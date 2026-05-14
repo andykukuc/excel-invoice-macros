@@ -1,0 +1,8 @@
+# Excel working files and locks
+~$*
+*.xlsx
+*.xlsm
+*.xls
+*.xlam
+.DS_Store
+*.tmp
