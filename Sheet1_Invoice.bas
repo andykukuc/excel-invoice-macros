@@ -13,15 +13,15 @@ Private Sub Worksheet_Change(ByVal Target As Range)
     Application.EnableEvents = False
     On Error GoTo CleanExit
 
-    ' Re-guard the two hourly labor rates back to 80 / 50 if changed
+    ' Re-guard the hourly labor rates back to 80 / 50 if changed.
+    ' Keys off the DESCRIPTION (col C) so it protects the tire rate
+    ' even though that row is now tagged "Tires", not "Labor".
     Dim r As Long
     For r = 15 To subtotalRow - 1
-        If ws.Cells(r, 2).Value = "Labor" Then
-            Select Case ws.Cells(r, 3).Value
-                Case "Repair Labor @ $80.00/hr": ws.Cells(r, 4).Value = 80
-                Case "Install Tire Labor @ $50.00/hr": ws.Cells(r, 4).Value = 50
-            End Select
-        End If
+        Select Case ws.Cells(r, 3).Value
+            Case "Repair Labor @ $80.00/hr": ws.Cells(r, 4).Value = 80
+            Case "Install Tire Labor @ $50.00/hr": ws.Cells(r, 4).Value = 50
+        End Select
     Next r
 
     UpdateLineAmounts
