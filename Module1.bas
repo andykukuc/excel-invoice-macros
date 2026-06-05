@@ -501,6 +501,7 @@ Public Sub ResetTemplate(Optional skipConfirm As Boolean = False)
     Application.ScreenUpdating = False
     Application.EnableEvents = False
     On Error GoTo ResetError
+    ShowAllBuckets          ' un-hide before clearing so no rows are stuck hidden
     On Error Resume Next
     ws.Unprotect
     On Error GoTo ResetError
@@ -555,13 +556,14 @@ Public Sub ResetTemplateManual()
 End Sub
 
 ' ============================================================
-'  PREVIEW / FIT TO ONE PAGE  (full size, flows to page 2 if needed)
+'  PREVIEW / FIT TO ONE PAGE  (hides $0 buckets so preview = printout)
 ' ============================================================
 Public Sub FitToOnePage()
     Dim ws As Worksheet: Set ws = Worksheets("Invoice")
     UpdateLineAmounts
     UpdateFormulas
     FormatInvoice
+    HideEmptyBuckets        ' <-- hide $0 labor/tire lines before preview/print
     Dim fc As Range, lastRow As Long
     Set fc = ws.Columns("D").Find(What:="Total Due", LookIn:=xlValues, LookAt:=xlPart)
     lastRow = IIf(fc Is Nothing, ws.UsedRange.Rows.Count, fc.Row + 1)
@@ -576,6 +578,65 @@ Public Sub FitToOnePage()
         .PrintGridlines = False
     End With
     ws.PrintPreview
+End Sub
+
+' ============================================================
+'  HIDE / SHOW EMPTY BUCKETS
+'  When a rate row (=$80/hr or $50/hr) has a $0 amount, hide that
+'  line item AND its matching summary total row, so empty labor /
+'  tire buckets don't print. ShowAllBuckets un-hides everything
+'  (call it before editing so rows aren't stuck hidden).
+'
+'  WIRING:
+'   - In Workbook_BeforeSave, add  HideEmptyBuckets  AFTER FormatInvoice.
+'   - In Worksheet_Change (Sheet1), add  ShowAllBuckets  near the top,
+'     right after the EnableEvents=False line, so editing always sees all rows.
+'   - Optionally call ShowAllBuckets at the start of ResetTemplate.
+' ============================================================
+Public Sub HideEmptyBuckets()
+    Dim ws As Worksheet: Set ws = Worksheets("Invoice")
+    Dim subtotalRow As Long: subtotalRow = FindSubtotalRow(ws)
+    If subtotalRow = 0 Then Exit Sub
+    Dim lastItemRow As Long: lastItemRow = subtotalRow - 1
+
+    Dim r As Long
+    Dim repairAmt As Double, tireAmt As Double
+    Dim repairRow As Long: repairRow = 0
+    Dim tireRow As Long: tireRow = 0
+
+    ' Locate the two rate rows and read their amounts (col E)
+    For r = 15 To lastItemRow
+        Select Case ws.Cells(r, 3).Value
+            Case "Repair Labor @ $80.00/hr"
+                repairRow = r
+                If IsNumeric(ws.Cells(r, 5).Value) Then repairAmt = ws.Cells(r, 5).Value
+            Case "Install Tire Labor @ $50.00/hr"
+                tireRow = r
+                If IsNumeric(ws.Cells(r, 5).Value) Then tireAmt = ws.Cells(r, 5).Value
+        End Select
+    Next r
+
+    ' Hide / show the $80 repair line + Labor Total summary row
+    If repairRow > 0 Then ws.Rows(repairRow).Hidden = (repairAmt = 0)
+    Dim lt As Range
+    Set lt = ws.Columns("D").Find(What:="Labor Total", LookIn:=xlValues, LookAt:=xlWhole)
+    If Not lt Is Nothing Then ws.Rows(lt.Row).Hidden = (repairAmt = 0)
+
+    ' Hide / show the $50 tire line + Tire Labor Total summary row
+    If tireRow > 0 Then ws.Rows(tireRow).Hidden = (tireAmt = 0)
+    Dim tt As Range
+    Set tt = ws.Columns("D").Find(What:="Tire Labor Total", LookIn:=xlValues, LookAt:=xlWhole)
+    If Not tt Is Nothing Then ws.Rows(tt.Row).Hidden = (tireAmt = 0)
+End Sub
+
+' Un-hide every row in the line-item + summary block (so editing isn't blocked)
+Public Sub ShowAllBuckets()
+    Dim ws As Worksheet: Set ws = Worksheets("Invoice")
+    Dim dueCell As Range
+    Set dueCell = ws.Columns("D").Find(What:="Total Due", LookIn:=xlValues, LookAt:=xlPart)
+    Dim lastRow As Long
+    lastRow = IIf(dueCell Is Nothing, 40, dueCell.Row)
+    ws.Rows("15:" & lastRow).Hidden = False
 End Sub
 
 ' ============================================================

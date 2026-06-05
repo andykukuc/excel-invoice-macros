@@ -13,6 +13,8 @@ Private Sub Worksheet_Change(ByVal Target As Range)
     Application.EnableEvents = False
     On Error GoTo CleanExit
 
+    ShowAllBuckets          ' un-hide any rows hidden by HideEmptyBuckets before editing
+
     ' Re-guard the hourly labor rates back to 80 / 50 if changed.
     ' Keys off the DESCRIPTION (col C) so it protects the tire rate
     ' even though that row is now tagged "Tires", not "Labor".

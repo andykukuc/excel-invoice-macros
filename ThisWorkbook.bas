@@ -17,6 +17,7 @@ Private Sub Workbook_BeforeSave(ByVal SaveAsUI As Boolean, Cancel As Boolean)
     UpdateLineAmounts
     UpdateFormulas
     FormatInvoice          ' make it pretty every save
+    HideEmptyBuckets       ' suppress $0 labor/tire rows before save/PDF
 
     Application.EnableEvents = True
     Application.ScreenUpdating = True
