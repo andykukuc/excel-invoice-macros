@@ -8,13 +8,16 @@ End Sub
 
 Private Sub Workbook_BeforeSave(ByVal SaveAsUI As Boolean, Cancel As Boolean)
     If bSaveAsTemplate Then Exit Sub
-
     On Error GoTo BeforeSaveError
-
     Application.ScreenUpdating = False
+    Application.EnableEvents = False
+
     AlignLineItems
     UpdateLineAmounts
     UpdateFormulas
+    FormatInvoice          ' make it pretty every save
+
+    Application.EnableEvents = True
     Application.ScreenUpdating = True
 
     If InStr(1, ThisWorkbook.Name, "Invoice_Template", vbTextCompare) > 0 Then
@@ -24,6 +27,7 @@ Private Sub Workbook_BeforeSave(ByVal SaveAsUI As Boolean, Cancel As Boolean)
     Exit Sub
 
 BeforeSaveError:
+    Application.EnableEvents = True
     Application.ScreenUpdating = True
     Cancel = True
     MsgBox "Error preparing invoice for save:" & Chr(13) & _
