@@ -1,22 +1,26 @@
 # excel-invoice-macros
 
-Excel VBA macros for an invoice template used in a small trucking/fleet maintenance business. The template runs on both Windows and Mac (Samba share), handles save, reset, print layout, and auto-calculation of line items, taxes, and totals.
+Excel VBA macros for an invoice template used in a small trucking/fleet maintenance business. The template runs on both Windows and Mac (Samba share), handles save, reset, PDF export, print layout, and auto-calculation of line items, taxes, and totals.
 
 ## Modules
 
 | File | Description |
 |------|-------------|
-| `Module1.bas` | Core logic — save invoice, reset template, fit-to-page print setup, line item helpers |
+| `Module1.bas` | Core logic — save/export, reset, formatting, line item helpers |
 | `ThisWorkbook.bas` | Workbook event handlers — triggers formatting and save flow on BeforeSave |
 | `Sheet1_Invoice.bas` | Worksheet change handler — auto-updates line amounts as data is entered |
 
 ## Features
 
-- **SaveInvoice** — builds a filename from fleet number, model, invoice number, and date; lets you pick a folder on the Samba share via InputBox; saves a copy without touching the template
-- **ResetTemplate** — clears all invoice fields and generates a new random invoice number
-- **FitToOnePage** — hides empty line item rows, sets print area, and opens print preview scaled to one page
-- **AlignLineItems / UpdateLineAmounts / UpdateFormulas** — keeps subtotal, tax, and total due formulas in sync as line items change
-- Works on **Mac and Windows** — Mac uses `SaveCopyAs` to avoid SMB atomic-write issues
+- **SaveInvoice** — builds a filename from fleet number, model, invoice number, and date; exports both an `.xlsm` copy and a `.pdf` to your chosen folder
+- **ExportPDF** — exports the invoice as a letter-size portrait PDF; flows to page 2 if needed instead of forcing everything onto one page
+- **FormatInvoice** — applies alternating row shading, light borders, and currency formatting to the line item block
+- **UpdateLineAmounts** — auto-rolls hours tagged `Labor` into the `$80.00/hr` repair row and hours tagged `Tires` into the `$50.00/hr` install row; recalculates all amount columns
+- **UpdateFormulas** — rebuilds Subtotal, Parts Total, Labor Total, Sales Tax, Total Invoice, and Total Due formulas using explicit `SUMIF` tags; inserts a Labor Total row if missing
+- **AlignLineItems** — left-aligns and wraps text in the line item description column
+- **ResetTemplate** — clears all invoice fields, generates a new invoice number, and re-applies formatting
+- **FitToOnePage** — refreshes calculations and formatting, sets print area, and opens print preview
+- Works on **Mac and Windows** — Mac uses `SaveCopyAs` to avoid SMB atomic-write issues; Windows uses `GetSaveAsFilename`
 
 ## Setup
 
@@ -27,6 +31,16 @@ Excel VBA macros for an invoice template used in a small trucking/fleet maintena
    - `SaveInvoice` → Save button
    - `ResetTemplateManual` → New Invoice button
    - `FitToOnePage` → Print Preview button
+
+## Line Item Tagging
+
+The `B` column (tag) drives the summary totals:
+
+| Tag | Rolls into |
+|-----|-----------|
+| `Parts` | Parts Total |
+| `Labor` | Labor Total (also guards the $80/hr and $50/hr hourly rows) |
+| `Tires` | rolled into the $50/hr tire install labor row |
 
 ## Mac Notes
 
