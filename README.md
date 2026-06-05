@@ -6,20 +6,23 @@ Excel VBA macros for an invoice template used in a small trucking/fleet maintena
 
 | File | Description |
 |------|-------------|
-| `Module1.bas` | Core logic — save/export, reset, formatting, line item helpers |
-| `ThisWorkbook.bas` | Workbook event handlers — triggers formatting and save flow on BeforeSave |
+| `Module1.bas` | Core logic — save/export, reset, sort, formatting, line item helpers |
+| `ThisWorkbook.bas` | Workbook event handlers — triggers sort, formatting, and save flow on BeforeSave |
 | `Sheet1_Invoice.bas` | Worksheet change handler — auto-updates line amounts as data is entered |
 
 ## Features
 
-- **SaveInvoice** — builds a filename from fleet number, model, invoice number, and date; exports both an `.xlsm` copy and a `.pdf` to your chosen folder
-- **ExportPDF** — exports the invoice as a letter-size portrait PDF; flows to page 2 if needed instead of forcing everything onto one page
-- **FormatInvoice** — applies alternating row shading, light borders, and currency formatting to the line item block
-- **UpdateLineAmounts** — auto-rolls hours tagged `Labor` into the `$80.00/hr` repair row and hours tagged `Tires` into the `$50.00/hr` install row; recalculates all amount columns
-- **UpdateFormulas** — rebuilds Subtotal, Parts Total, Labor Total, Sales Tax, Total Invoice, and Total Due formulas using explicit `SUMIF` tags; inserts a Labor Total row if missing
+- **SaveInvoice** — builds a filename from fleet number, model, invoice number, and date; exports both an `.xlsm` copy and a `.pdf`; opens the saved copy and closes the template
+- **ExportPDF** — exports the invoice as a letter-size portrait PDF; flows to page 2 if needed
+- **SortLineItems** — sorts line items in memory (Parts → Labor → Tires); rate-bucket rows pinned to the bottom of their section; runs automatically on every save
+- **UpdateLineAmounts** — rolls `Labor`/`Install`-tagged hours into the `$80.00/hr` repair row and `Tires`-tagged hours into the `$50.00/hr` tire row; recalculates all amount columns
+- **UpdateFormulas** — rebuilds Subtotal, Parts Total, Labor Total, Tire Labor Total, Sales Tax, Total Invoice, and Total Due using explicit `SUMIF` tags; inserts missing summary rows automatically
+- **FormatInvoice** — applies alternating row shading, light borders, currency formatting, and `0.##` QTY format (so half-hours display correctly)
+- **HideEmptyBuckets** — hides the `$80/hr` repair row + Labor Total and `$50/hr` tire row + Tire Labor Total when their amounts are `$0`, keeping saves and PDFs clean
+- **ShowAllBuckets** — un-hides all rows from the line item block through Total Due; called automatically when editing starts so no rows are stuck hidden
 - **AlignLineItems** — left-aligns and wraps text in the line item description column
 - **ResetTemplate** — clears all invoice fields, generates a new invoice number, and re-applies formatting
-- **FitToOnePage** — refreshes calculations and formatting, sets print area, and opens print preview
+- **FitToOnePage** — refreshes calculations, hides empty buckets, sets print area, and opens print preview
 - Works on **Mac and Windows** — Mac uses `SaveCopyAs` to avoid SMB atomic-write issues; Windows uses `GetSaveAsFilename`
 
 ## Setup
@@ -34,13 +37,14 @@ Excel VBA macros for an invoice template used in a small trucking/fleet maintena
 
 ## Line Item Tagging
 
-The `B` column (tag) drives the summary totals:
+The `B` column (tag) drives sorting and summary totals:
 
-| Tag | Rolls into |
-|-----|-----------|
-| `Parts` | Parts Total |
-| `Labor` | Labor Total (also guards the $80/hr and $50/hr hourly rows) |
-| `Tires` | rolled into the $50/hr tire install labor row |
+| Tag | Sorts into | Rolls into |
+|-----|-----------|------------|
+| `Parts` | Parts section | Parts Total |
+| `Labor` | Labor section | Labor Total (hours → $80/hr repair row) |
+| `Install` | Labor section | Labor Total (normalized to `Labor`, hours → $80/hr repair row) |
+| `Tires` | Tires section | Tire Labor Total (hours → $50/hr tire row) |
 
 ## Mac Notes
 
