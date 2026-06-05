@@ -27,6 +27,26 @@ Private Sub Worksheet_Change(ByVal Target As Range)
     UpdateLineAmounts
     UpdateFormulas
 
+    ' --- Auto-insert a blank line ABOVE the first Labor row, so there's ---
+    ' --- always an empty parts line ready. Fires no matter which column ---
+    ' --- (QTY / Item / Description / Price) you filled in.               ---
+    subtotalRow = FindSubtotalRow(ws)          ' refresh (UpdateFormulas may have shifted rows)
+    Dim laborRow As Long: laborRow = 0
+    For r = 15 To subtotalRow - 1
+        If ws.Cells(r, 2).Value = "Labor" Then laborRow = r: Exit For
+    Next r
+    If laborRow >= 16 Then
+        Dim prev As Long: prev = laborRow - 1
+        ' If the row just above the Labor block is fully populated (Item + Desc),
+        ' insert a fresh blank line there so the user can keep typing.
+        If Trim(CStr(ws.Cells(prev, 2).Value)) <> "" _
+           And Trim(CStr(ws.Cells(prev, 3).Value)) <> "" Then
+            ws.Rows(laborRow).Insert Shift:=xlDown
+            ' Clear any inherited formatting/content on the new blank row
+            ws.Rows(laborRow).ClearContents
+        End If
+    End If
+
 CleanExit:
     Application.EnableEvents = True
 End Sub

@@ -55,7 +55,11 @@ Public Sub AlignLineItems()
 End Sub
 
 ' ============================================================
-'  UPDATE LINE AMOUNTS  (+ auto-roll Labor->$80/hr, Tires->$50/hr)
+'  UPDATE LINE AMOUNTS
+'  Tags (col B): Parts | Labor | Install | Tires
+'    - Labor   -> hours roll into $80/hr repair line
+'    - Install -> treated as Labor (hours -> $80/hr), normalized to "Labor"
+'    - Tires   -> hours roll into $50/hr tire line (folded into Labor Total)
 '  Skips merged rows (e.g. the tax note) so it never errors 1004.
 ' ============================================================
 Public Sub UpdateLineAmounts()
@@ -66,10 +70,17 @@ Public Sub UpdateLineAmounts()
 
     Dim lastItemRow As Long: lastItemRow = subtotalRow - 1
 
+    ' Normalize "Install" -> "Labor" so it folds into the $80/hr bucket & Labor Total
+    Dim r As Long
+    For r = LINEITEM_START To lastItemRow
+        If StrComp(Trim(CStr(ws.Cells(r, 2).Value)), "Install", vbTextCompare) = 0 Then
+            ws.Cells(r, 2).Value = "Labor"
+        End If
+    Next r
+
     ' Locate the two priced bucket rows by description
     Dim repairRow As Long: repairRow = 0
     Dim tireRow As Long: tireRow = 0
-    Dim r As Long
     For r = LINEITEM_START To lastItemRow
         Select Case ws.Cells(r, 3).Value
             Case "Repair Labor @ $80.00/hr": repairRow = r
@@ -276,8 +287,7 @@ Public Sub SaveInvoice()
         On Error GoTo WinSaveError
         ThisWorkbook.SaveCopyAs Filename:=winXlsm
         ExportPDF ws, winPdf
-        MsgBox "Invoice saved:" & Chr(13) & winXlsm & Chr(13) & winPdf, _
-               vbInformation, "Invoice Saved"
+        OpenSavedAndCloseTemplate winXlsm     ' <-- open the new invoice, close template
         Exit Sub
 WinSaveError:
         MsgBox "Save failed: " & Err.Description, vbCritical, "Save Error"
@@ -321,11 +331,34 @@ WinSaveError:
     On Error GoTo MacSaveError
     ThisWorkbook.SaveCopyAs Filename:=macXlsm
     ExportPDF ws, macPdf
-    MsgBox "Invoice saved:" & Chr(13) & macXlsm & Chr(13) & macPdf, _
-           vbInformation, "Invoice Saved"
+    OpenSavedAndCloseTemplate macXlsm         ' <-- open the new invoice, close template
     Exit Sub
 MacSaveError:
     MsgBox "Save failed: " & Err.Description, vbCritical, "Save Error"
+End Sub
+
+' ============================================================
+'  Open the just-saved invoice, then close the template workbook
+' ============================================================
+Private Sub OpenSavedAndCloseTemplate(savedPath As String)
+    Dim tmpl As Workbook: Set tmpl = ThisWorkbook
+    Application.EnableEvents = False        ' don't let Workbook_Open auto-reset fire
+    Dim wbNew As Workbook
+    On Error Resume Next
+    Set wbNew = Workbooks.Open(savedPath)
+    On Error GoTo 0
+    Application.EnableEvents = True
+
+    If wbNew Is Nothing Then
+        MsgBox "Saved, but could not reopen:" & Chr(13) & savedPath, vbExclamation, "Saved"
+        Exit Sub
+    End If
+
+    wbNew.Activate
+    ' Close the template WITHOUT saving (keeps template pristine for next time)
+    Application.DisplayAlerts = False
+    tmpl.Close SaveChanges:=False
+    Application.DisplayAlerts = True
 End Sub
 
 ' ============================================================
