@@ -12,17 +12,18 @@ Excel VBA macros for an invoice template used in a small trucking/fleet maintena
 
 ## Features
 
-- **SaveInvoice** — builds a filename from fleet number, model, invoice number, and date; exports both an `.xlsm` copy and a `.pdf`; opens the saved copy and closes the template
-- **ExportPDF** — exports the invoice as a letter-size portrait PDF; flows to page 2 if needed
-- **SortLineItems** — sorts line items in memory (Parts → Labor → Tires); rate-bucket rows pinned to the bottom of their section; runs automatically on every save
+- **SaveInvoice** — builds a filename from fleet number, model, invoice number, and date; saves a clean `.xlsm` copy (no auto PDF); deletes `$0` rate-bucket rows, blank rows, and Tire Labor Total if no tires before saving; opens the saved copy and closes the template
+- **ExportPDF** — exports the invoice as a letter-size portrait PDF with 0.5" margins; deletes empty rows before export for a clean printout (not called automatically — user prints to Adobe PDF printer manually)
+- **SortLineItems** — sorts line items in memory (Parts → Labor → Tires); rate-bucket rows pinned to the bottom of their section; called from `FitToOnePage`
 - **UpdateLineAmounts** — rolls `Labor`/`Install`-tagged hours into the `$80.00/hr` repair row and `Tires`-tagged hours into the `$50.00/hr` tire row; recalculates all amount columns
 - **UpdateFormulas** — rebuilds Subtotal, Parts Total, Labor Total, Tire Labor Total, Sales Tax, Total Invoice, and Total Due using explicit `SUMIF` tags; inserts missing summary rows automatically
-- **FormatInvoice** — applies alternating row shading, light borders, currency formatting, and `0.##` QTY format (so half-hours display correctly)
-- **HideEmptyBuckets** — hides the `$80/hr` repair row + Labor Total and `$50/hr` tire row + Tire Labor Total when their amounts are `$0`, keeping saves and PDFs clean
+- **FormatInvoice** — applies alternating row shading, currency formatting, `0.##` QTY format (so half-hours display correctly), summary section row height, and Parts/Labor/Tires dropdown on the ITEM column; does **not** touch cell borders so template borders are preserved
+- **HideEmptyBuckets** — hides the `$80/hr` repair row + Labor Total and `$50/hr` tire row + Tire Labor Total when their amounts are `$0`; used by `FitToOnePage` for print preview
 - **ShowAllBuckets** — un-hides all rows from the line item block through Total Due; called automatically when editing starts so no rows are stuck hidden
 - **AlignLineItems** — left-aligns and wraps text in the line item description column
 - **ResetTemplate** — clears all invoice fields, generates a new invoice number, and re-applies formatting
-- **FitToOnePage** — refreshes calculations, hides empty buckets, sets print area, and opens print preview
+- **FitToOnePage** — sorts line items, refreshes calculations, hides empty buckets, sets print area with 0.5" margins fit to one page tall, and opens print preview
+- **Auto-fill (Sheet1)** — typing in A7 (Bill To) auto-fills A8, C7, C8 (Ship To mirrors Bill To); typing in A11 auto-fills B11
 - Works on **Mac and Windows** — Mac uses `SaveCopyAs` to avoid SMB atomic-write issues; Windows uses `GetSaveAsFilename`
 
 ## Setup
