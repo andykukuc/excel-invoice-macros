@@ -313,12 +313,6 @@ Public Sub FormatInvoice()
     ws.Range("D" & LINEITEM_START & ":E" & lastItemRow).NumberFormat = "$#,##0.00"
     ws.Range("A" & LINEITEM_START & ":A" & lastItemRow).NumberFormat = "0.##"
 
-    With ws.Range("A14:E" & lastItemRow).Borders
-        .LineStyle = xlContinuous
-        .Weight = xlThin
-        .Color = RGB(180, 180, 180)
-    End With
-
     Dim r As Long
     For r = LINEITEM_START To lastItemRow
         If (r - LINEITEM_START) Mod 2 = 0 Then
@@ -329,6 +323,24 @@ Public Sub FormatInvoice()
     Next r
 
     AlignLineItems
+
+    ' Consistent row height for summary section (Subtotal through Total Due)
+    Dim dueCell As Range
+    Set dueCell = ws.Columns("D").Find(What:="Total Due", LookIn:=xlValues, LookAt:=xlPart)
+    If Not dueCell Is Nothing Then
+        ws.Rows(subtotalRow & ":" & dueCell.Row).RowHeight = 22
+    End If
+
+    ' Apply Parts / Labor / Tires dropdown to the ITEM column (B)
+    With ws.Range("B" & LINEITEM_START & ":B" & lastItemRow).Validation
+        .Delete
+        .Add Type:=xlValidateList, AlertStyle:=xlValidAlertInformation, _
+             Operator:=xlBetween, Formula1:="Parts,Labor,Tires"
+        .IgnoreBlank = True
+        .InCellDropdown = True
+        .ShowInput = False
+        .ShowError = False
+    End With
 End Sub
 
 ' ============================================================
@@ -356,10 +368,47 @@ Public Sub SaveInvoice()
         Exit Sub
     End If
 
+    Application.EnableEvents = False
+    Application.ScreenUpdating = False
     AlignLineItems
     UpdateLineAmounts
     UpdateFormulas
     FormatInvoice
+
+    ' Delete $0 bucket rows and blank rows so saved copy is clean to print
+    Dim rClean As Long
+    For rClean = FindSubtotalRow(ws) - 1 To 15 Step -1
+        If Not IsMergedRow(ws, rClean) Then
+            Dim dClean As String: dClean = Trim(CStr(ws.Cells(rClean, 3).Value))
+            Select Case dClean
+                Case "Repair Labor @ $80.00/hr", "Install Tire Labor @ $50.00/hr"
+                    If ws.Cells(rClean, 5).Value = 0 Then ws.Rows(rClean).Delete Shift:=xlUp
+                Case ""
+                    If Trim(CStr(ws.Cells(rClean, 2).Value)) = "" _
+                       And Trim(CStr(ws.Cells(rClean, 1).Value)) = "" Then
+                        ws.Rows(rClean).Delete Shift:=xlUp
+                    End If
+            End Select
+        End If
+    Next rClean
+
+    ' Remove Tire Labor Total summary row if no tire items
+    Dim hasTiresSI As Boolean: hasTiresSI = False
+    Dim rTck As Long
+    For rTck = 15 To FindSubtotalRow(ws) - 1
+        If Trim(CStr(ws.Cells(rTck, 2).Value)) = "Tires" Then hasTiresSI = True: Exit For
+    Next rTck
+    If Not hasTiresSI Then
+        Dim ttSI As Range
+        Set ttSI = ws.Columns("D").Find(What:="Tire Labor Total", LookIn:=xlValues, LookAt:=xlWhole)
+        Do While Not ttSI Is Nothing
+            ttSI.EntireRow.Delete
+            Set ttSI = ws.Columns("D").Find(What:="Tire Labor Total", LookIn:=xlValues, LookAt:=xlWhole)
+        Loop
+    End If
+
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
 
     Dim fleetNo As String, model As String, invoiceNo As String
     Dim dateStr As String, baseName As String
@@ -378,10 +427,8 @@ Public Sub SaveInvoice()
             Title:="Save Invoice As")
         If chosenPath = False Then Exit Sub
         Dim winXlsm As String: winXlsm = CStr(chosenPath)
-        Dim winPdf As String:  winPdf = Left(winXlsm, InStrRev(winXlsm, ".") - 1) & ".pdf"
         On Error GoTo WinSaveError
         ThisWorkbook.SaveCopyAs Filename:=winXlsm
-        ExportPDF ws, winPdf
         OpenSavedAndCloseTemplate winXlsm     ' <-- open the new invoice, close template
         Exit Sub
 WinSaveError:
@@ -422,10 +469,8 @@ WinSaveError:
     End If
 
     Dim macXlsm As String: macXlsm = saveDir & baseName & ".xlsm"
-    Dim macPdf As String:  macPdf = saveDir & baseName & ".pdf"
     On Error GoTo MacSaveError
     ThisWorkbook.SaveCopyAs Filename:=macXlsm
-    ExportPDF ws, macPdf
     OpenSavedAndCloseTemplate macXlsm         ' <-- open the new invoice, close template
     Exit Sub
 MacSaveError:
@@ -460,11 +505,49 @@ End Sub
 '  EXPORT PDF  (full size, flows to page 2 if needed)
 ' ============================================================
 Public Sub ExportPDF(ws As Worksheet, pdfPath As String)
-    Dim subtotalRow As Long: subtotalRow = FindSubtotalRow(ws)
-    Dim dueRow As Long
+    ' Disable events so row deletions don't trigger Worksheet_Change / UpdateFormulas
+    Application.EnableEvents = False
+
+    ' Delete $0 rate-bucket rows AND blank rows from line item area
+    Dim rr As Long
+    For rr = FindSubtotalRow(ws) - 1 To 15 Step -1
+        If Not IsMergedRow(ws, rr) Then
+            Dim desc As String: desc = Trim(CStr(ws.Cells(rr, 3).Value))
+            Select Case desc
+                Case "Repair Labor @ $80.00/hr", "Install Tire Labor @ $50.00/hr"
+                    If ws.Cells(rr, 5).Value = 0 Then ws.Rows(rr).Delete Shift:=xlUp
+                Case ""
+                    ' Remove blank rows (no tag, no description, no qty)
+                    If Trim(CStr(ws.Cells(rr, 2).Value)) = "" _
+                       And Trim(CStr(ws.Cells(rr, 1).Value)) = "" Then
+                        ws.Rows(rr).Delete Shift:=xlUp
+                    End If
+            End Select
+        End If
+    Next rr
+
+    ' Remove Tire Labor Total summary rows if no Tires-tagged items remain
+    Dim hasTires As Boolean: hasTires = False
+    Dim rck As Long
+    For rck = 15 To FindSubtotalRow(ws) - 1
+        If Trim(CStr(ws.Cells(rck, 2).Value)) = "Tires" Then hasTires = True: Exit For
+    Next rck
+    If Not hasTires Then
+        Dim cleanCell As Range
+        Set cleanCell = ws.Columns("D").Find(What:="Tire Labor Total", LookIn:=xlValues, LookAt:=xlWhole)
+        Do While Not cleanCell Is Nothing
+            cleanCell.EntireRow.Delete
+            Set cleanCell = ws.Columns("D").Find(What:="Tire Labor Total", LookIn:=xlValues, LookAt:=xlWhole)
+        Loop
+    End If
+
+    Application.EnableEvents = True
+
+    ' Re-find Total Due row after any deletions shifted rows
     Dim fc As Range
     Set fc = ws.Columns("D").Find(What:="Total Due", LookIn:=xlValues, LookAt:=xlPart)
-    dueRow = IIf(fc Is Nothing, subtotalRow + 6, fc.Row + 1)
+    Dim dueRow As Long
+    dueRow = IIf(fc Is Nothing, FindSubtotalRow(ws) + 6, fc.Row + 1)
 
     With ws.PageSetup
         .PrintArea = "A1:E" & dueRow
@@ -560,10 +643,15 @@ End Sub
 ' ============================================================
 Public Sub FitToOnePage()
     Dim ws As Worksheet: Set ws = Worksheets("Invoice")
+    Application.EnableEvents = False
+    Application.ScreenUpdating = False
+    SortLineItems
     UpdateLineAmounts
     UpdateFormulas
     FormatInvoice
     HideEmptyBuckets        ' <-- hide $0 labor/tire lines before preview/print
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
     Dim fc As Range, lastRow As Long
     Set fc = ws.Columns("D").Find(What:="Total Due", LookIn:=xlValues, LookAt:=xlPart)
     lastRow = IIf(fc Is Nothing, ws.UsedRange.Rows.Count, fc.Row + 1)
@@ -571,8 +659,12 @@ Public Sub FitToOnePage()
         .PrintArea = "A1:E" & lastRow
         .Orientation = xlPortrait
         .PaperSize = xlPaperLetter
+        .LeftMargin = Application.InchesToPoints(0.5)
+        .RightMargin = Application.InchesToPoints(0.5)
+        .TopMargin = Application.InchesToPoints(0.5)
+        .BottomMargin = Application.InchesToPoints(0.5)
         .FitToPagesWide = 1
-        .FitToPagesTall = False
+        .FitToPagesTall = 1
         .Zoom = False
         .CenterHorizontally = True
         .PrintGridlines = False

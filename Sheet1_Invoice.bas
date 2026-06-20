@@ -5,6 +5,24 @@ Private Sub Worksheet_Change(ByVal Target As Range)
     Dim subtotalRow As Long: subtotalRow = FindSubtotalRow(ws)
     If subtotalRow = 0 Then Exit Sub
 
+    ' Auto-fill A8, C7, C8 when A7 is entered
+    If Not Intersect(Target, ws.Range("A7")) Is Nothing Then
+        Application.EnableEvents = False
+        ws.Range("A8").Value = ws.Range("A7").Value
+        ws.Range("C7").Value = ws.Range("A7").Value
+        ws.Range("C8").Value = ws.Range("A7").Value
+        Application.EnableEvents = True
+        Exit Sub
+    End If
+
+    ' Auto-fill B11 when A11 is entered
+    If Not Intersect(Target, ws.Range("A11")) Is Nothing Then
+        Application.EnableEvents = False
+        ws.Range("B11").Value = ws.Range("A11").Value
+        Application.EnableEvents = True
+        Exit Sub
+    End If
+
     ' Only react to edits inside the line-item block, columns A-D
     Dim itemBlock As Range
     Set itemBlock = ws.Range("A15:D" & (subtotalRow - 1))
