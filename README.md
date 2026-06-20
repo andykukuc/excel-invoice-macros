@@ -49,7 +49,7 @@ The `B` column (tag) drives sorting and summary totals:
 
 ## Mac Notes
 
-- The Samba share must be mounted at `/Users/andykukuc/mnt/invoices/` (edit `baseDir` in `Module1.bas` to match your mount point)
+- The Samba share must be mounted and the path set in `baseDir` inside `Module1.bas` to match your local mount point
 - Uses `InputBox` for folder selection since Mac Excel can't use `GetSaveAsFilename` with file filters on network paths
 - Uses `SaveCopyAs` instead of `SaveAs` to avoid the repair dialog on SMB shares
 
