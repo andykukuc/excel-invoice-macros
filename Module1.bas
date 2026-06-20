@@ -552,6 +552,15 @@ Public Sub ResetTemplate(Optional skipConfirm As Boolean = False)
     ws.Cells(4, 5).Value = 1
 
     UpdateFormulas
+
+    ' Remove Tire Labor Total row on a fresh template (no tire items)
+    Dim ttReset As Range
+    Set ttReset = ws.Columns("D").Find(What:="Tire Labor Total", LookIn:=xlValues, LookAt:=xlWhole)
+    Do While Not ttReset Is Nothing
+        ttReset.EntireRow.Delete
+        Set ttReset = ws.Columns("D").Find(What:="Tire Labor Total", LookIn:=xlValues, LookAt:=xlWhole)
+    Loop
+
     FormatInvoice
 
     Application.EnableEvents = True
