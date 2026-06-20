@@ -13,7 +13,6 @@ Excel VBA macros for an invoice template used in a small trucking/fleet maintena
 ## Features
 
 - **SaveInvoice** — builds a filename from fleet number, model, invoice number, and date; saves a clean `.xlsm` copy (no auto PDF); deletes `$0` rate-bucket rows, blank rows, and Tire Labor Total if no tires before saving; opens the saved copy and closes the template
-- **ExportPDF** — exports the invoice as a letter-size portrait PDF with 0.5" margins; deletes empty rows before export for a clean printout (not called automatically — user prints to Adobe PDF printer manually)
 - **SortLineItems** — sorts line items in memory (Parts → Labor → Tires); rate-bucket rows pinned to the bottom of their section; called from `FitToOnePage`
 - **UpdateLineAmounts** — rolls `Labor`/`Install`-tagged hours into the `$80.00/hr` repair row and `Tires`-tagged hours into the `$50.00/hr` tire row; recalculates all amount columns
 - **UpdateFormulas** — rebuilds Subtotal, Parts Total, Labor Total, Tire Labor Total, Sales Tax, Total Invoice, and Total Due using explicit `SUMIF` tags; inserts missing summary rows automatically
