@@ -94,29 +94,39 @@ osascript -e 'tell application "Microsoft Excel" to return formula1 of ¬
   "Invoice_Template_Formatted_V2.xlsm"'
 ```
 
-## Mac mini workflow
+## Mac deployment requirements
 
-The Mac deployment scripts (desktop launcher, SMB mount agent, and the
-sandbox helper) are site-specific and are not published in this repository.
-They live in a local `mac_v2/` folder that is git-ignored, because they
-contain the SMB server name and account for a particular installation.
+Deployment is site-specific and is not published in this repository, because it
+encodes the SMB server name and account for a particular installation. What
+follows is what any such setup has to provide.
 
-The workflow they provide:
+**The sandbox helper is required.** Mac Excel is sandboxed and cannot write to
+SMB folders without repeatedly prompting for file access. V2 works around this
+by writing to Excel's private temporary directory and delegating the copy to an
+AppleScript helper running outside the sandbox.
 
-1. Copy the `mac_v2` folder to the target Mac.
-2. Open Terminal in that folder and run `zsh install_invoice_shortcut_v2.sh`.
-3. Double-click **Invoice Maker V2** on the Desktop.
-4. The first time, enter the SMB account password and select **Remember this
-   password in my keychain**.
+The helper must be installed at:
 
-The shortcut connects to `smb://<SMB_USER>@<SERVER>/invoices`, waits for the
-share, and opens `Invoice_Template_Formatted_V2.xlsm`. It never contains or
-writes the SMB password — macOS Keychain holds it. The SMB username is set by
-the `SMB_USER` value in `open-invoice-maker-v2.sh`.
+```
+~/Library/Application Scripts/com.microsoft.Excel/InvoiceMakerV2.applescript
+```
 
-The installer also places `InvoiceMakerV2.applescript` in Excel's required
-`~/Library/Application Scripts/com.microsoft.Excel` folder. Do not use `sudo`;
-the helper must be installed for the same macOS user who runs Excel.
+That filename and location are fixed — `Module1_V2.bas` calls
+`AppleScriptTask("InvoiceMakerV2.applescript", ...)`. Install it for the same
+macOS account that runs Excel, without `sudo`; the folder is per-user and a
+root-owned copy will not be found.
+
+The helper exposes two handlers to the workbook: one that lists the customer
+folders on the share, and one that moves a staged `.xlsm` and `.pdf` into a
+customer's `Excel` and `PDF` folders. Copy files without preserving permission
+bits — SMB shares commonly reject `fchmod`, which fails the copy after the data
+has already been written.
+
+**Share access.** The user needs the `invoices` SMB share mounted, with the
+password stored in the macOS Keychain rather than in any script. A desktop
+launcher that mounts the share and opens
+`Invoice_Template_Formatted_V2.xlsm` gives a non-technical user a single icon
+to click.
 
 V2 resolves the share from the workbook's own location first. It also supports
 Finder's `/Volumes/invoices` mount and a portable `$HOME/mnt/invoices` mount.

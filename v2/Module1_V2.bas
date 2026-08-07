@@ -1105,7 +1105,7 @@ Private Function ChooseCustomerFolderByNumberV2(ByVal invoiceRoot As String) As 
 
 CustomerListError:
     MsgBox "The customer list could not be read." & vbCrLf & vbCrLf & _
-           "Run the mac_v2 installer again, then retry." & vbCrLf & vbCrLf & _
+           "Run the Mac installer again, then retry." & vbCrLf & vbCrLf & _
            Err.Description, vbCritical, "Customer List Failed"
     Exit Function
     #Else
@@ -1321,7 +1321,7 @@ Private Function MoveMacStagedFilesV2(ByVal stagedXlsmPath As String, _
 
 HelperError:
     errorMessage = "The Mac invoice helper is missing or could not run." & vbCrLf & _
-                   "Run the mac_v2 installer again, then retry." & vbCrLf & vbCrLf & _
+                   "Run the Mac installer again, then retry." & vbCrLf & vbCrLf & _
                    Err.Description
 #Else
     errorMessage = "The Mac invoice helper is only available on macOS."

@@ -1,56 +1,80 @@
 # excel-invoice-macros
 
-Excel VBA macros for an invoice template used in a small trucking/fleet maintenance business. The template runs on both Windows and Mac (Samba share), handles save, reset, PDF export, print layout, and auto-calculation of line items, taxes, and totals.
+Excel VBA macros for an invoice template used in a small trucking and fleet
+maintenance business. The template handles save, reset, print layout, and
+automatic calculation of line items, taxes, and totals.
 
-## Modules
+Two generations live here side by side.
 
-| File | Description |
-|------|-------------|
-| `Module1.bas` | Core logic — save/export, reset, sort, formatting, line item helpers |
-| `ThisWorkbook.bas` | Workbook event handlers — triggers sort, formatting, and save flow on BeforeSave |
-| `Sheet1_Invoice.bas` | Worksheet change handler — auto-updates line amounts as data is entered |
+| | [`v1/`](v1/) | [`v2/`](v2/) |
+|---|---|---|
+| Status | Stable, superseded | Current |
+| Platform | Windows and Mac | Mac (Apple Silicon, SMB share) |
+| Audience | Developer imports the modules by hand | Non-technical user clicks a button |
+| Install | Import three `.bas` files into a workbook | VBA already embedded in the workbook |
+| Saving | Prompts for a folder, writes one `.xlsm` | Writes `.xlsm` and PDF into per-customer folders |
 
-## Features
+**V1 is kept deliberately.** It is a known-good copy that predates the V2 work,
+and it remains the reference for the original Windows-compatible behaviour.
+Nothing in V2 modifies it.
 
-- **SaveInvoice** — builds a filename from fleet number, model, invoice number, and date; saves a clean `.xlsm` copy (no auto PDF); deletes `$0` rate-bucket rows, blank rows, and Tire Labor Total if no tires before saving; opens the saved copy and closes the template
-- **SortLineItems** — sorts line items in memory (Parts → Labor → Tires); rate-bucket rows pinned to the bottom of their section; called from `FitToOnePage`
-- **UpdateLineAmounts** — rolls `Labor`/`Install`-tagged hours into the `$80.00/hr` repair row and `Tires`-tagged hours into the `$50.00/hr` tire row; recalculates all amount columns
-- **UpdateFormulas** — rebuilds Subtotal, Parts Total, Labor Total, Tire Labor Total, Sales Tax, Total Invoice, and Total Due using explicit `SUMIF` tags; inserts missing summary rows automatically
-- **FormatInvoice** — applies alternating row shading, currency formatting, `0.##` QTY format (so half-hours display correctly), summary section row height, and Parts/Labor/Tires dropdown on the ITEM column; does **not** touch cell borders so template borders are preserved
-- **HideEmptyBuckets** — hides the `$80/hr` repair row + Labor Total and `$50/hr` tire row + Tire Labor Total when their amounts are `$0`; used by `FitToOnePage` for print preview
-- **ShowAllBuckets** — un-hides all rows from the line item block through Total Due; called automatically when editing starts so no rows are stuck hidden
-- **AlignLineItems** — left-aligns and wraps text in the line item description column
-- **ResetTemplate** — clears all invoice fields, generates a new invoice number, and re-applies formatting
-- **FitToOnePage** — sorts line items, refreshes calculations, hides empty buckets, sets print area with 0.5" margins fit to one page tall, and opens print preview
-- **Auto-fill (Sheet1)** — typing in A7 (Bill To) auto-fills A8, C7, C8 (Ship To mirrors Bill To); typing in A11 auto-fills B11
-- Works on **Mac and Windows** — Mac uses `SaveCopyAs` to avoid SMB atomic-write issues; Windows uses `GetSaveAsFilename`
+## Which one do I want?
 
-## Setup
+Use **V2** if you are running the invoice program. It is what is deployed on
+the Mac mini: the workbook opens from a desktop shortcut, the VBA and buttons
+are already inside it, and saving files into the right customer folders is
+automatic.
 
-1. Open your `.xlsm` invoice template in Excel
-2. Open the VBA editor (`Alt+F11` on Windows, `Cmd+Option+F11` on Mac)
-3. Import each `.bas` file: **File → Import File**
-4. Assign macros to buttons on the sheet as needed:
-   - `SaveInvoice` → Save button
-   - `ResetTemplateManual` → New Invoice button
-   - `FitToOnePage` → Print Preview button
+Use **V1** if you want the original, smaller module set, need Windows support,
+or want to see the behaviour V2 was built from.
 
-## Line Item Tagging
+## What V2 changed
 
-The `B` column (tag) drives sorting and summary totals:
+V2 was a reliability and usability pass over V1, not a rewrite. The main
+differences:
 
-| Tag | Sorts into | Rolls into |
-|-----|-----------|------------|
-| `Parts` | Parts section | Parts Total |
-| `Labor` | Labor section | Labor Total (hours → $80/hr repair row) |
-| `Install` | Labor section | Labor Total (normalized to `Labor`, hours → $80/hr repair row) |
-| `Tires` | Tires section | Tire Labor Total (hours → $50/hr tire row) |
+- **Non-destructive saving.** V1 deleted blank and `$0` rows *before* asking
+  where to save, so cancelling the dialog left the invoice damaged. V2 stages
+  everything and never deletes rows from the open template.
+- **Merge-safe reset.** `Range.ClearContents` raised error 1004 on merged rows
+  in some Mac Excel builds. V2 clears cell by cell.
+- **No sandbox prompts.** Mac Excel asked for "Grant File Access" repeatedly on
+  SMB paths. V2 writes to Excel's private temp directory and hands the files to
+  an `AppleScriptTask` helper outside the sandbox.
+- **Error recovery.** V1 could leave `EnableEvents` off after a failure, making
+  Excel appear permanently broken. V2 restores global state on every path.
+- **Buttons.** Large bilingual Save, Print, and New Invoice buttons, excluded
+  from both paper and PDF output.
+- **Road Service line type**, alongside Parts, Labor, and Tires.
 
-## Mac Notes
+Full details in [`v2/README.md`](v2/README.md).
 
-- The Samba share must be mounted and the path set in `baseDir` inside `Module1.bas` to match your local mount point
-- Uses `InputBox` for folder selection since Mac Excel can't use `GetSaveAsFilename` with file filters on network paths
-- Uses `SaveCopyAs` instead of `SaveAs` to avoid the repair dialog on SMB shares
+## Line types
+
+The ITEM column (B) drives sorting and the summary totals.
+
+| Type | Behaviour | In V1? |
+|---|---|---|
+| `Parts` | Plain `qty x unit price` → **Parts Total** | yes |
+| `Labor` | Hours roll into the `$80.00/hr` repair row → **Labor Total** | yes |
+| `Install` | Normalised to `Labor` | yes |
+| `Tires` | Hours roll into the `$50.00/hr` tire row → **Tire Labor Total** | yes |
+| `Road Service` | Plain `qty x unit price`, no fixed rate, no roll-up, no separate total — flows straight into the Subtotal | V2 only |
+
+## Repository layout
+
+```
+v1/   original modules and their README
+v2/   current modules, build helper, and their README
+```
+
+The Mac deployment pieces (desktop launcher, SMB mount agent, sandbox helper)
+are **not** published here — they encode the SMB server name and account for a
+specific installation. [`v2/README.md`](v2/README.md) documents what a
+deployment has to provide, including the sandbox helper that V2 requires.
+
+The `.xlsm` workbooks are also git-ignored; the VBA source in this repository
+is the authoritative copy.
 
 ## License
 
