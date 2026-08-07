@@ -34,6 +34,21 @@ mini user does not need to open the VBA editor or copy and paste any code.
   `PrintObject` property to false, so they are excluded from paper and PDF.
 - Supports multiple printed pages while keeping the invoice one page wide.
 
+## Line types
+
+The ITEM column (B) is a dropdown with four values:
+
+| Type | Behaviour |
+|---|---|
+| `Parts` | Plain `qty x unit price`. Summed into **Parts Total**. |
+| `Labor` | Hours roll up into the pinned `Repair Labor @ $80.00/hr` row. Summed into **Labor Total**. |
+| `Tires` | Hours roll up into the pinned `Install Tire Labor @ $50.00/hr` row. Summed into **Tire Labor Total**. |
+| `Road Service` | Plain `qty x unit price` at whatever rate is entered. No fixed rate, no roll-up, no separate total — it flows straight into the Subtotal. |
+
+`Road Service` is used infrequently and deliberately has no rate bucket: the
+unit price is typed per invoice rather than fixed in code. Line items sort
+Parts, Labor, Tires, then Road Service.
+
 ## V2 source files (developer reference only)
 
 | File | Destination |
@@ -46,6 +61,38 @@ mini user does not need to open the VBA editor or copy and paste any code.
 Workbook and worksheet event procedures cannot be activated merely by
 importing them as ordinary `.bas` modules. They must be placed in the two
 document modules shown above.
+
+### Updating `Module1_V2` in the workbook
+
+Editing this file does not change the workbook — the VBA is embedded in
+`Invoice_Template_Formatted_V2.xlsm` and must be re-imported.
+
+Close the workbook everywhere first; an SMB lock will block the save. Then in
+Excel: **Tools → Macro → Visual Basic Editor**, and
+
+1. **File → Import File…**, press `Cmd-Shift-G`, type the full path to
+   `Module1_V2.bas`, and confirm. It arrives as `Module1_V21` because import
+   adds a component rather than replacing one.
+2. Select the old `Module1_V2` in the project tree, then **File → Remove
+   Module1_V2…** and answer **No** to the export prompt.
+3. Rename `Module1_V21` back to `Module1_V2` in the Properties pane.
+4. **Debug → Compile VBAProject** — it must complete with no dialog.
+5. Run the `SaveTemplate` macro. Do not use a normal Save; `Workbook_BeforeSave`
+   redirects it into the invoice-save routine and refuses an incomplete invoice.
+
+Do not paste the module with `Cmd-A`/`Cmd-V` through UI automation. If the code
+pane does not hold keyboard focus, macOS drops the Command modifier and types a
+literal `av` before `Option Explicit`, which fails to compile with "Invalid
+outside procedure". Importing avoids the clipboard entirely.
+
+Verify afterwards by reading the dropdown back rather than trusting a clean
+compile — a compile succeeds against unchanged code:
+
+```
+osascript -e 'tell application "Microsoft Excel" to return formula1 of ¬
+  validation of range "B15" of worksheet "Invoice" of workbook ¬
+  "Invoice_Template_Formatted_V2.xlsm"'
+```
 
 ## Mac mini workflow
 
@@ -86,3 +133,13 @@ current shortcut:
 5. A long invoice continues onto page two and remains one page wide.
 6. Reboot the Mac mini, use the Desktop shortcut, and confirm that Finder uses
    the Keychain credential to reconnect the SMB share.
+7. A `Road Service` line multiplies qty by unit price and reaches the Subtotal
+   without appearing in Parts, Labor, or Tire Labor Total.
+
+## Known issues
+
+`EnsureBlankEntryRowV2` inserts a blank entry row above the first `Labor` row.
+On Mac Excel the inserted row can inherit the ITEM tag from the row above, so a
+stray tag such as `Road Service` appears in column B with no qty, description,
+or price. Totals ignore it and the save routine strips empty rows, but a qty
+typed on that row would be billed under the inherited type.
