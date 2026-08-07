@@ -6,3 +6,7 @@
 *.xlam
 .DS_Store
 *.tmp
+
+# Mac deployment scripts: contain the SMB host and account for this
+# installation. Kept local; only the VBA sources are published.
+mac_v2/
