@@ -6,3 +6,14 @@
 *.xlam
 .DS_Store
 *.tmp
+
+# Local Mac deployment scripts. These encode the SMB host and account for a
+# specific installation, so only the VBA sources are published.
+mac_v2/
+mac/
+deploy/
+*.applescript
+*.plist
+install_invoice_shortcut*.sh
+open-invoice-maker*.sh
+mount-invoices-share*.sh
