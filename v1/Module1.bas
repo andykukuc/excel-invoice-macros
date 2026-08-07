@@ -437,7 +437,9 @@ WinSaveError:
     End If
 
     ' --- Mac: folder picker ---
-    Dim baseDir As String: baseDir = "/Users/andykukuc/mnt/invoices/"
+    ' Portable: resolves to the current user's home. Edit this line if the
+    ' share is mounted somewhere other than ~/mnt/invoices/.
+    Dim baseDir As String: baseDir = Environ$("HOME") & "/mnt/invoices/"
     Dim folders() As String, folderCount As Integer, folderList As String, entry As String
     folderCount = 0
     entry = Dir(baseDir, vbDirectory)
