@@ -98,13 +98,21 @@ End Sub
 
 Public Sub InitializeInvoiceMakerV2()
     Dim startupError As String
+    Dim startupSheet As Worksheet
 
     On Error GoTo InitError
 
     If IsTemplateWorkbookV2(ThisWorkbook) Then
         ResetTemplateV2 True
     Else
-        FormatInvoiceV2 InvoiceSheetV2(ThisWorkbook), True
+        ' A saved invoice copy is written with the sheet protected. FormatInvoiceV2
+        ' writes NumberFormat and Interior directly and relies on its caller to
+        ' unprotect first, which the change handler does but this path did not --
+        ' reopening a saved invoice failed with 1004 on the first NumberFormat.
+        ' ProtectInvoiceV2 below restores protection.
+        Set startupSheet = InvoiceSheetV2(ThisWorkbook)
+        startupSheet.Unprotect
+        FormatInvoiceV2 startupSheet, True
     End If
 
     EnsureButtonsPresentV2 ThisWorkbook
