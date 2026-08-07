@@ -7,6 +7,11 @@ Option Explicit
 
 Public bV2InternalSave As Boolean
 
+' Item-row count that FormatInvoiceV2 last applied banding/validation for.
+' Purely a repaint cache: it is re-derived from the sheet on every call, and
+' the worst case if it ever went stale is cosmetic banding, never wrong data.
+Private lV2FormattedItemRows As Long
+
 Private Const INVOICE_SHEET As String = "Invoice"
 Private Const LINEITEM_START As Long = 15
 Private Const STANDARD_ITEM_ROWS As Long = 4
@@ -99,7 +104,7 @@ Public Sub InitializeInvoiceMakerV2()
     If IsTemplateWorkbookV2(ThisWorkbook) Then
         ResetTemplateV2 True
     Else
-        FormatInvoiceV2 InvoiceSheetV2(ThisWorkbook)
+        FormatInvoiceV2 InvoiceSheetV2(ThisWorkbook), True
     End If
 
     EnsureButtonsPresentV2 ThisWorkbook
@@ -426,7 +431,8 @@ Public Sub ResetTemplateV2(Optional ByVal skipConfirm As Boolean = False)
     UpdateLineAmountsV2 ws
     UpdateFormulasV2 ws
     resetStep = "formatting the invoice"
-    FormatInvoiceV2 ws
+    ' Reset rebuilds the item rows, so the cached row count cannot be trusted.
+    FormatInvoiceV2 ws, True
     resetStep = "restoring invoice rows"
     ShowAllBucketsV2 ws
     resetStep = "protecting the invoice sheet"
@@ -461,19 +467,23 @@ Public Sub PrepareForEditingSaveV2(ByVal ws As Worksheet)
     AlignLineItemsV2 ws
     UpdateLineAmountsV2 ws
     UpdateFormulasV2 ws
-    FormatInvoiceV2 ws
+    ' Sorting reorders rows, so banding must be reapplied unconditionally.
+    FormatInvoiceV2 ws, True
     ProtectInvoiceV2 ws
 End Sub
 
 Public Sub HandleInvoiceChangeV2(ByVal ws As Worksheet, ByVal Target As Range)
     Dim oldEvents As Boolean
     Dim oldScreen As Boolean
+    Dim oldCalc As XlCalculation
     Dim subtotalRow As Long
     Dim itemBlock As Range
     Dim r As Long
+    Dim insertedRow As Boolean
 
     oldEvents = Application.EnableEvents
     oldScreen = Application.ScreenUpdating
+    oldCalc = Application.Calculation
     On Error GoTo ChangeError
 
     If Not Intersect(Target, ws.Range("A7")) Is Nothing Then
@@ -499,8 +509,11 @@ Public Sub HandleInvoiceChangeV2(ByVal ws As Worksheet, ByVal Target As Range)
     ' Suppress repainting for the full recalculation pass; without this every
     ' keystroke visibly re-renders the banding and summary formatting.
     Application.ScreenUpdating = False
+    ' Each formula written below would otherwise trigger a full dependency
+    ' recalculation on its own. Nothing in this pass reads back a computed
+    ' value, so one Calculate at the end is enough (see ChangeDone).
+    Application.Calculation = xlCalculationManual
     ws.Unprotect
-    ShowAllBucketsV2 ws
 
     For r = LINEITEM_START To subtotalRow - 1
         Select Case Trim$(CStr(ws.Cells(r, 3).Value))
@@ -511,20 +524,29 @@ Public Sub HandleInvoiceChangeV2(ByVal ws As Worksheet, ByVal Target As Range)
 
     ' subtotalRow stays valid for these three: nothing above the subtotal row
     ' moves (UpdateFormulasV2 only ever inserts summary rows BELOW it).
-    ' EnsureBlankEntryRowV2 CAN insert an item row, so FormatInvoiceV2 after
-    ' it must locate the subtotal itself.
+    ' EnsureBlankEntryRowV2 reports whether it inserted an item row, which is
+    ' the one thing that shifts the subtotal down, so the row stays accurate
+    ' for the two calls after it.
     UpdateLineAmountsV2 ws, subtotalRow
     UpdateFormulasV2 ws, subtotalRow
-    EnsureBlankEntryRowV2 ws, subtotalRow
-    FormatInvoiceV2 ws
-    ProtectInvoiceV2 ws
+    insertedRow = EnsureBlankEntryRowV2(ws, subtotalRow)
+    If insertedRow Then subtotalRow = subtotalRow + 1
+    FormatInvoiceV2 ws, insertedRow, subtotalRow
+    ProtectInvoiceV2 ws, subtotalRow
 
 ChangeDone:
+    ' Release manual calculation before events, so the recalculation happens
+    ' while this handler still owns the sheet.
+    If Application.Calculation <> oldCalc Then
+        Application.Calculation = oldCalc
+        ws.Calculate
+    End If
     Application.EnableEvents = oldEvents
     Application.ScreenUpdating = oldScreen
     Exit Sub
 
 ChangeError:
+    If Application.Calculation <> oldCalc Then Application.Calculation = oldCalc
     Application.EnableEvents = oldEvents
     Application.ScreenUpdating = oldScreen
     On Error Resume Next
@@ -629,7 +651,8 @@ Private Sub DeleteShapeIfPresentV2(ByVal ws As Worksheet, ByVal shapeName As Str
     On Error GoTo 0
 End Sub
 
-Public Sub ProtectInvoiceV2(ByVal ws As Worksheet)
+Public Sub ProtectInvoiceV2(ByVal ws As Worksheet, _
+                            Optional ByVal knownSubtotalRow As Long = 0)
     Dim subtotalRow As Long
     Dim dueCell As Range
     Dim salesTaxCell As Range
@@ -639,7 +662,8 @@ Public Sub ProtectInvoiceV2(ByVal ws As Worksheet)
     ws.Unprotect
     ws.Cells.Locked = True
 
-    subtotalRow = FindSubtotalRowV2(ws)
+    subtotalRow = knownSubtotalRow
+    If subtotalRow = 0 Then subtotalRow = FindSubtotalRowV2(ws)
     If subtotalRow > LINEITEM_START Then
         ws.Range("A15:D" & subtotalRow - 1).Locked = False
         ws.Range("A15:D" & subtotalRow - 1).Interior.Color = RGB(255, 252, 220)
@@ -775,6 +799,7 @@ Public Sub UpdateLineAmountsV2(ByVal ws As Worksheet, _
     Dim r As Long
     Dim tag As String
     Dim description As String
+    Dim block As Variant
 
     ' The change handler passes the row it already located; every worksheet
     ' Find here repeats on each keystroke otherwise.
@@ -783,25 +808,37 @@ Public Sub UpdateLineAmountsV2(ByVal ws As Worksheet, _
     If subtotalRow <= LINEITEM_START Then Exit Sub
     lastItemRow = subtotalRow - 1
 
-    For r = LINEITEM_START To lastItemRow
-        If StrComp(Trim$(CStr(ws.Cells(r, 2).Value)), "Install", vbTextCompare) = 0 Then
-            ws.Cells(r, 2).Value = "Labor"
+    ' One bulk read replaces roughly eight per-row property crossings. On Mac
+    ' Excel each Range access is an expensive bridge call, and this runs on
+    ' every keystroke. Column indexes into block() are 1-based off column A.
+    block = ws.Range("A" & LINEITEM_START & ":E" & lastItemRow).Value2
+
+    For r = 1 To UBound(block, 1)
+        If StrComp(Trim$(CStr(block(r, 2) & "")), "Install", vbTextCompare) = 0 Then
+            ws.Cells(LINEITEM_START + r - 1, 2).Value = "Labor"
+            block(r, 2) = "Labor"
         End If
 
-        description = Trim$(CStr(ws.Cells(r, 3).Value))
-        If StrComp(description, REPAIR_DESCRIPTION, vbTextCompare) = 0 Then repairRow = r
-        If StrComp(description, TIRE_DESCRIPTION, vbTextCompare) = 0 Then tireRow = r
+        description = Trim$(CStr(block(r, 3) & ""))
+        If StrComp(description, REPAIR_DESCRIPTION, vbTextCompare) = 0 Then
+            repairRow = LINEITEM_START + r - 1
+        End If
+        If StrComp(description, TIRE_DESCRIPTION, vbTextCompare) = 0 Then
+            tireRow = LINEITEM_START + r - 1
+        End If
     Next r
 
-    For r = LINEITEM_START To lastItemRow
-        tag = Trim$(CStr(ws.Cells(r, 2).Value))
-        description = Trim$(CStr(ws.Cells(r, 3).Value))
+    For r = 1 To UBound(block, 1)
+        tag = Trim$(CStr(block(r, 2) & ""))
+        description = Trim$(CStr(block(r, 3) & ""))
 
-        If description <> "" And IsNumeric(ws.Cells(r, 1).Value) Then
-            If r <> repairRow And StrComp(tag, "Labor", vbTextCompare) = 0 Then
-                laborHours = laborHours + CDbl(ws.Cells(r, 1).Value)
-            ElseIf r <> tireRow And StrComp(tag, "Tires", vbTextCompare) = 0 Then
-                tireCount = tireCount + CDbl(ws.Cells(r, 1).Value)
+        If description <> "" And IsNumeric(block(r, 1)) Then
+            If LINEITEM_START + r - 1 <> repairRow And _
+               StrComp(tag, "Labor", vbTextCompare) = 0 Then
+                laborHours = laborHours + CDbl(block(r, 1))
+            ElseIf LINEITEM_START + r - 1 <> tireRow And _
+                   StrComp(tag, "Tires", vbTextCompare) = 0 Then
+                tireCount = tireCount + CDbl(block(r, 1))
             End If
         End If
     Next r
@@ -810,20 +847,24 @@ Public Sub UpdateLineAmountsV2(ByVal ws As Worksheet, _
         ws.Cells(repairRow, 1).Value = laborHours
         ws.Cells(repairRow, 2).Value = "Labor"
         ws.Cells(repairRow, 4).Value = REPAIR_RATE
+        block(repairRow - LINEITEM_START + 1, 1) = laborHours
     End If
 
     If tireRow > 0 Then
         ws.Cells(tireRow, 1).Value = tireCount
         ws.Cells(tireRow, 2).Value = "Tires"
         ws.Cells(tireRow, 4).Value = TIRE_RATE
+        block(tireRow - LINEITEM_START + 1, 1) = tireCount
     End If
 
-    For r = LINEITEM_START To lastItemRow
-        If Not IsMergedRowV2(ws, r) Then
-            If IsNumeric(ws.Cells(r, 1).Value) And Trim$(CStr(ws.Cells(r, 1).Value)) <> "" Then
-                ws.Cells(r, 5).FormulaR1C1 = "=RC[-4]*RC[-1]"
+    ' IsMergedRowV2 must stay a live sheet check: Value2 returns Empty for a
+    ' merged cell's non-anchor members and cannot report merge state.
+    For r = 1 To UBound(block, 1)
+        If Not IsMergedRowV2(ws, LINEITEM_START + r - 1) Then
+            If IsNumeric(block(r, 1)) And Trim$(CStr(block(r, 1) & "")) <> "" Then
+                ws.Cells(LINEITEM_START + r - 1, 5).FormulaR1C1 = "=RC[-4]*RC[-1]"
             Else
-                ClearValuesV2 ws.Cells(r, 5)
+                ClearValuesV2 ws.Cells(LINEITEM_START + r - 1, 5)
             End If
         End If
     Next r
@@ -904,34 +945,62 @@ Public Sub UpdateFormulasV2(ByVal ws As Worksheet, _
     If Not dueCell Is Nothing Then dueCell.Offset(0, 1).NumberFormat = "$#,##0.00"
 End Sub
 
-Public Sub FormatInvoiceV2(ByVal ws As Worksheet)
+' The banding, dropdown, number formats and row heights depend only on HOW MANY
+' item rows there are, not on their contents. Reapplying them on every keystroke
+' cost a per-row Interior write and a full Validation teardown/rebuild for no
+' visible change. Pass forceFullFormat:=True after any structural row change,
+' and from the install/reset paths where the cached count cannot be trusted.
+Public Sub FormatInvoiceV2(ByVal ws As Worksheet, _
+                           Optional ByVal forceFullFormat As Boolean = False, _
+                           Optional ByVal knownSubtotalRow As Long = 0)
     Dim subtotalRow As Long
     Dim lastItemRow As Long
     Dim dueCell As Range
     Dim rowNumber As Long
     Dim separator As String
+    Dim itemRowCount As Long
+    Dim whiteBand As Range
+    Dim tintBand As Range
 
-    subtotalRow = FindSubtotalRowV2(ws)
+    subtotalRow = knownSubtotalRow
+    If subtotalRow = 0 Then subtotalRow = FindSubtotalRowV2(ws)
     If subtotalRow <= LINEITEM_START Then Exit Sub
     lastItemRow = subtotalRow - 1
+    itemRowCount = lastItemRow - LINEITEM_START + 1
+
+    If Not forceFullFormat And itemRowCount = lV2FormattedItemRows Then Exit Sub
 
     ws.Range("D15:E" & lastItemRow).NumberFormat = "$#,##0.00"
     ws.Range("A15:A" & lastItemRow).NumberFormat = "0.##"
-    AlignLineItemsV2 ws
+    AlignLineItemsV2 ws, subtotalRow
 
+    ' Build the two banding groups and colour each in a single write instead of
+    ' one Interior.Color crossing per row.
     For rowNumber = LINEITEM_START To lastItemRow
         If (rowNumber - LINEITEM_START) Mod 2 = 0 Then
-            ws.Range("A" & rowNumber & ":E" & rowNumber).Interior.Color = RGB(255, 255, 255)
+            If whiteBand Is Nothing Then
+                Set whiteBand = ws.Range("A" & rowNumber & ":E" & rowNumber)
+            Else
+                Set whiteBand = Union(whiteBand, ws.Range("A" & rowNumber & ":E" & rowNumber))
+            End If
         Else
-            ws.Range("A" & rowNumber & ":E" & rowNumber).Interior.Color = RGB(244, 247, 252)
+            If tintBand Is Nothing Then
+                Set tintBand = ws.Range("A" & rowNumber & ":E" & rowNumber)
+            Else
+                Set tintBand = Union(tintBand, ws.Range("A" & rowNumber & ":E" & rowNumber))
+            End If
         End If
     Next rowNumber
+    If Not whiteBand Is Nothing Then whiteBand.Interior.Color = RGB(255, 255, 255)
+    If Not tintBand Is Nothing Then tintBand.Interior.Color = RGB(244, 247, 252)
 
     separator = Application.International(xlListSeparator)
     ApplyLineTypeValidationV2 ws.Range("B15:B" & lastItemRow), separator
 
     Set dueCell = FindLabelV2(ws, "Total Due", xlPart)
     If Not dueCell Is Nothing Then ws.Rows(subtotalRow & ":" & dueCell.Row).RowHeight = 22
+
+    lV2FormattedItemRows = itemRowCount
 End Sub
 
 Private Sub ApplyLineTypeValidationV2(ByVal targetRange As Range, ByVal separator As String)
@@ -958,9 +1027,11 @@ ValidationUnavailable:
     Err.Clear
 End Sub
 
-Public Sub AlignLineItemsV2(ByVal ws As Worksheet)
+Public Sub AlignLineItemsV2(ByVal ws As Worksheet, _
+                            Optional ByVal knownSubtotalRow As Long = 0)
     Dim subtotalRow As Long
-    subtotalRow = FindSubtotalRowV2(ws)
+    subtotalRow = knownSubtotalRow
+    If subtotalRow = 0 Then subtotalRow = FindSubtotalRowV2(ws)
     If subtotalRow <= LINEITEM_START Then Exit Sub
 
     With ws.Range("A15:A" & subtotalRow - 1)
@@ -978,8 +1049,10 @@ Public Sub AlignLineItemsV2(ByVal ws As Worksheet)
     End With
 End Sub
 
-Private Sub EnsureBlankEntryRowV2(ByVal ws As Worksheet, _
-                                  Optional ByVal knownSubtotalRow As Long = 0)
+' Returns True when a fresh blank entry row was inserted, which shifts the
+' subtotal row down by one. Callers holding a subtotal row must add 1.
+Private Function EnsureBlankEntryRowV2(ByVal ws As Worksheet, _
+                                       Optional ByVal knownSubtotalRow As Long = 0) As Boolean
     Dim subtotalRow As Long
     Dim laborRow As Long
     Dim previousRow As Long
@@ -997,7 +1070,7 @@ Private Sub EnsureBlankEntryRowV2(ByVal ws As Worksheet, _
         End If
     Next r
 
-    If laborRow < LINEITEM_START + 1 Then Exit Sub
+    If laborRow < LINEITEM_START + 1 Then Exit Function
     previousRow = laborRow - 1
     ' Insert a fresh entry row only when the row above is a COMPLETE line.
     ' Checking tag+description alone fired mid-entry (users pick the type and
@@ -1009,8 +1082,9 @@ Private Sub EnsureBlankEntryRowV2(ByVal ws As Worksheet, _
        Trim$(CStr(ws.Cells(previousRow, 4).Value)) <> "" Then
         ws.Rows(laborRow).Insert Shift:=xlDown
         ClearValuesV2 ws.Range("A" & laborRow & ":E" & laborRow)
+        EnsureBlankEntryRowV2 = True
     End If
-End Sub
+End Function
 
 Private Function IsMergedRowV2(ByVal ws As Worksheet, ByVal rowNumber As Long) As Boolean
     Dim mergeState As Variant
@@ -1025,6 +1099,25 @@ End Function
 ' ============================================================
 '  OUTPUT COPY AND PRINT LAYOUT
 ' ============================================================
+
+' True when a row carries a type or description but is missing the quantity or
+' the price, so no amount can be computed for it. The two fixed rate rows are
+' never incomplete: they always hold a hardcoded rate and a quantity of 0, and
+' are removed by their own zero-amount rule instead.
+Private Function IsIncompleteLineV2(ByVal ws As Worksheet, ByVal rowNumber As Long) As Boolean
+    Dim tag As String
+    Dim description As String
+
+    description = Trim$(CStr(ws.Cells(rowNumber, 3).Value))
+    If StrComp(description, REPAIR_DESCRIPTION, vbTextCompare) = 0 Then Exit Function
+    If StrComp(description, TIRE_DESCRIPTION, vbTextCompare) = 0 Then Exit Function
+
+    tag = Trim$(CStr(ws.Cells(rowNumber, 2).Value))
+    If tag = "" And description = "" Then Exit Function
+
+    IsIncompleteLineV2 = Not (IsNumeric(ws.Cells(rowNumber, 1).Value) And _
+                              IsNumeric(ws.Cells(rowNumber, 4).Value))
+End Function
 
 Private Sub PrepareOutputCopyV2(ByVal wb As Workbook)
     Dim ws As Worksheet
@@ -1048,12 +1141,21 @@ Private Sub PrepareOutputCopyV2(ByVal wb As Workbook)
                    Trim$(CStr(ws.Cells(rowNumber, 2).Value)) = "" And _
                    description = "" Then
                 ws.Rows(rowNumber).Delete Shift:=xlUp
+            ElseIf IsIncompleteLineV2(ws, rowNumber) Then
+                ' A half-filled row (a type and description but no quantity or
+                ' price) is abandoned data, not a real charge. The entry-row
+                ' gate only ever inspects the row above the repair anchor, so a
+                ' row left incomplete elsewhere - fill one row, jump to another,
+                ' come back - reaches here still half-filled and would print as
+                ' a blank-value line on the customer's invoice.
+                ws.Rows(rowNumber).Delete Shift:=xlUp
             End If
         End If
     Next rowNumber
 
     UpdateFormulasV2 ws
-    FormatInvoiceV2 ws
+    ' Rows were deleted above, so the cached row count is stale by definition.
+    FormatInvoiceV2 ws, True
     HideEmptyBucketsV2 ws
     ConfigurePageV2 ws
     ProtectInvoiceV2 ws
