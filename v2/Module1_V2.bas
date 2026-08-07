@@ -233,6 +233,7 @@ Public Sub SaveInvoiceV2()
 
 SaveError:
     Dim saveMessage As String
+    Dim recoveredPath As String
     saveMessage = Err.Description
     bV2InternalSave = False
     Application.EnableEvents = oldEvents
@@ -242,15 +243,58 @@ SaveError:
         MsgBox "The invoice was saved, but the final handoff did not complete." & _
                vbCrLf & vbCrLf & saveMessage, vbExclamation, "Invoice Saved With Warning"
     ElseIf xlsmPath <> "" And FileExistsV2(xlsmPath) Then
-        MsgBox "A temporary Excel recovery copy exists, but saving did not finish." & vbCrLf & _
-               "Your open template was not changed." & vbCrLf & vbCrLf & _
-               xlsmPath & vbCrLf & vbCrLf & saveMessage, vbExclamation, _
-               "Partial Save"
+        ' The invoice was fully built but never reached the customer folders.
+        ' The staging area is $TMPDIR: invisible in Finder and cleared on
+        ' restart, so a path there is not a usable recovery for this user.
+        ' Ask the helper (outside the sandbox) to copy it to the Desktop.
+        recoveredPath = RecoverStagedInvoiceV2(xlsmPath, pdfPath, baseName)
+        If recoveredPath <> "" Then
+            MsgBox "Saving to the customer folders did not finish, so the completed " & _
+                   "invoice was placed on the Desktop instead:" & vbCrLf & vbCrLf & _
+                   recoveredPath & vbCrLf & vbCrLf & _
+                   "The customer folders were not updated. When the connection is " & _
+                   "back, save it again from Invoice Maker." & vbCrLf & vbCrLf & _
+                   saveMessage, vbExclamation, "Invoice Saved to Desktop"
+        Else
+            MsgBox "Saving did not finish and the invoice could not be copied to " & _
+                   "the Desktop." & vbCrLf & _
+                   "Do NOT restart the Mac - the temporary copy below disappears " & _
+                   "on restart. Save the invoice again now, or copy this file first:" & _
+                   vbCrLf & vbCrLf & xlsmPath & vbCrLf & vbCrLf & saveMessage, _
+                   vbExclamation, "Partial Save"
+        End If
     Else
         MsgBox "The invoice could not be saved. Your open invoice was not changed." & _
                vbCrLf & vbCrLf & saveMessage, vbCritical, "Save Failed"
     End If
 End Sub
+
+' Ask the AppleScriptTask helper to copy a staged-but-unsaved invoice to
+' ~/Desktop/Invoice Recovery. Returns the recovered path, or "" when the
+' helper is unavailable (for example an older installed version without the
+' recoverInvoiceFiles handler). Never raises: this only runs inside the save
+' error path, where a second failure must not mask the original message.
+Private Function RecoverStagedInvoiceV2(ByVal stagedXlsm As String, _
+                                        ByVal stagedPdf As String, _
+                                        ByVal baseName As String) As String
+    #If Mac Then
+    Dim helperResult As String
+    Dim resultParts() As String
+
+    On Error GoTo RecoveryUnavailable
+    helperResult = AppleScriptTask("InvoiceMakerV2.applescript", _
+                                   "recoverInvoiceFiles", _
+                                   stagedXlsm & Chr$(30) & stagedPdf & Chr$(30) & baseName)
+    resultParts = Split(helperResult, Chr$(30))
+    If UBound(resultParts) >= 1 Then
+        If resultParts(0) = "OK" Then RecoverStagedInvoiceV2 = resultParts(1)
+    End If
+    Exit Function
+
+RecoveryUnavailable:
+    Err.Clear
+    #End If
+End Function
 
 Public Sub NewInvoiceV2()
     If IsTemplateWorkbookV2(ThisWorkbook) Then
@@ -423,11 +467,13 @@ End Sub
 
 Public Sub HandleInvoiceChangeV2(ByVal ws As Worksheet, ByVal Target As Range)
     Dim oldEvents As Boolean
+    Dim oldScreen As Boolean
     Dim subtotalRow As Long
     Dim itemBlock As Range
     Dim r As Long
 
     oldEvents = Application.EnableEvents
+    oldScreen = Application.ScreenUpdating
     On Error GoTo ChangeError
 
     If Not Intersect(Target, ws.Range("A7")) Is Nothing Then
@@ -450,6 +496,9 @@ Public Sub HandleInvoiceChangeV2(ByVal ws As Worksheet, ByVal Target As Range)
     If Intersect(Target, itemBlock) Is Nothing Then Exit Sub
 
     Application.EnableEvents = False
+    ' Suppress repainting for the full recalculation pass; without this every
+    ' keystroke visibly re-renders the banding and summary formatting.
+    Application.ScreenUpdating = False
     ws.Unprotect
     ShowAllBucketsV2 ws
 
@@ -460,18 +509,24 @@ Public Sub HandleInvoiceChangeV2(ByVal ws As Worksheet, ByVal Target As Range)
         End Select
     Next r
 
-    UpdateLineAmountsV2 ws
-    UpdateFormulasV2 ws
-    EnsureBlankEntryRowV2 ws
+    ' subtotalRow stays valid for these three: nothing above the subtotal row
+    ' moves (UpdateFormulasV2 only ever inserts summary rows BELOW it).
+    ' EnsureBlankEntryRowV2 CAN insert an item row, so FormatInvoiceV2 after
+    ' it must locate the subtotal itself.
+    UpdateLineAmountsV2 ws, subtotalRow
+    UpdateFormulasV2 ws, subtotalRow
+    EnsureBlankEntryRowV2 ws, subtotalRow
     FormatInvoiceV2 ws
     ProtectInvoiceV2 ws
 
 ChangeDone:
     Application.EnableEvents = oldEvents
+    Application.ScreenUpdating = oldScreen
     Exit Sub
 
 ChangeError:
     Application.EnableEvents = oldEvents
+    Application.ScreenUpdating = oldScreen
     On Error Resume Next
     ProtectInvoiceV2 ws
     On Error GoTo 0
@@ -709,7 +764,8 @@ Private Function SortKeyV2(ByVal tag As String, ByVal description As String) As 
     SortKeyV2 = result
 End Function
 
-Public Sub UpdateLineAmountsV2(ByVal ws As Worksheet)
+Public Sub UpdateLineAmountsV2(ByVal ws As Worksheet, _
+                               Optional ByVal knownSubtotalRow As Long = 0)
     Dim subtotalRow As Long
     Dim lastItemRow As Long
     Dim repairRow As Long
@@ -720,7 +776,10 @@ Public Sub UpdateLineAmountsV2(ByVal ws As Worksheet)
     Dim tag As String
     Dim description As String
 
-    subtotalRow = FindSubtotalRowV2(ws)
+    ' The change handler passes the row it already located; every worksheet
+    ' Find here repeats on each keystroke otherwise.
+    subtotalRow = knownSubtotalRow
+    If subtotalRow = 0 Then subtotalRow = FindSubtotalRowV2(ws)
     If subtotalRow <= LINEITEM_START Then Exit Sub
     lastItemRow = subtotalRow - 1
 
@@ -770,7 +829,8 @@ Public Sub UpdateLineAmountsV2(ByVal ws As Worksheet)
     Next r
 End Sub
 
-Public Sub UpdateFormulasV2(ByVal ws As Worksheet)
+Public Sub UpdateFormulasV2(ByVal ws As Worksheet, _
+                            Optional ByVal knownSubtotalRow As Long = 0)
     Dim subtotalRow As Long
     Dim itemAmountRange As String
     Dim tagRange As String
@@ -782,7 +842,8 @@ Public Sub UpdateFormulasV2(ByVal ws As Worksheet)
     Dim dueCell As Range
     Dim creditCell As Range
 
-    subtotalRow = FindSubtotalRowV2(ws)
+    subtotalRow = knownSubtotalRow
+    If subtotalRow = 0 Then subtotalRow = FindSubtotalRowV2(ws)
     If subtotalRow = 0 Then Exit Sub
     itemAmountRange = "E15:E" & subtotalRow - 1
     tagRange = "B15:B" & subtotalRow - 1
@@ -818,7 +879,9 @@ Public Sub UpdateFormulasV2(ByVal ws As Worksheet)
     Set taxCell = FindLabelV2(ws, "Sales Tax", xlPart)
     Set totalCell = FindLabelV2(ws, "Total Invoice Amount", xlPart)
     If Not taxCell Is Nothing And Not totalCell Is Nothing Then
-        totalCell.Offset(0, 1).Formula = "=" & ws.Cells(FindSubtotalRowV2(ws), 5).Address & _
+        ' subtotalRow is unchanged: the summary-row inserts above happen below
+        ' it, so a second worksheet Find here would return the same row.
+        totalCell.Offset(0, 1).Formula = "=" & ws.Cells(subtotalRow, 5).Address & _
                                                "+" & taxCell.Offset(0, 1).Address
     End If
 
@@ -915,15 +978,20 @@ Public Sub AlignLineItemsV2(ByVal ws As Worksheet)
     End With
 End Sub
 
-Private Sub EnsureBlankEntryRowV2(ByVal ws As Worksheet)
+Private Sub EnsureBlankEntryRowV2(ByVal ws As Worksheet, _
+                                  Optional ByVal knownSubtotalRow As Long = 0)
     Dim subtotalRow As Long
     Dim laborRow As Long
     Dim previousRow As Long
     Dim r As Long
 
-    subtotalRow = FindSubtotalRowV2(ws)
+    subtotalRow = knownSubtotalRow
+    If subtotalRow = 0 Then subtotalRow = FindSubtotalRowV2(ws)
+    ' Anchor on the fixed repair-rate row by its description, not on the first
+    ' "Labor" tag: a user line tagged Labor above the anchor would otherwise
+    ' become the insertion point.
     For r = LINEITEM_START To subtotalRow - 1
-        If StrComp(Trim$(CStr(ws.Cells(r, 2).Value)), "Labor", vbTextCompare) = 0 Then
+        If StrComp(Trim$(CStr(ws.Cells(r, 3).Value)), REPAIR_DESCRIPTION, vbTextCompare) = 0 Then
             laborRow = r
             Exit For
         End If
@@ -931,8 +999,14 @@ Private Sub EnsureBlankEntryRowV2(ByVal ws As Worksheet)
 
     If laborRow < LINEITEM_START + 1 Then Exit Sub
     previousRow = laborRow - 1
+    ' Insert a fresh entry row only when the row above is a COMPLETE line.
+    ' Checking tag+description alone fired mid-entry (users pick the type and
+    ' description first), leaving a half-filled row that survived both the
+    ' sort filter and the save-time cleanup as a phantom invoice line.
     If Trim$(CStr(ws.Cells(previousRow, 2).Value)) <> "" And _
-       Trim$(CStr(ws.Cells(previousRow, 3).Value)) <> "" Then
+       Trim$(CStr(ws.Cells(previousRow, 3).Value)) <> "" And _
+       Trim$(CStr(ws.Cells(previousRow, 1).Value)) <> "" And _
+       Trim$(CStr(ws.Cells(previousRow, 4).Value)) <> "" Then
         ws.Rows(laborRow).Insert Shift:=xlDown
         ClearValuesV2 ws.Range("A" & laborRow & ":E" & laborRow)
     End If
