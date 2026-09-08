@@ -1,7 +1,7 @@
 # Invoice Maker V2
 
-V2 is a parallel upgrade. The original `Module1.bas`, `Sheet1_Invoice.bas`,
-`ThisWorkbook.bas`, README, and production template are deliberately unchanged.
+V2 is the current production implementation. Its VBA project is intentionally
+kept to one standard module plus the two Excel document modules.
 
 The ready-to-use workbook is `Invoice_Template_Formatted_V2.xlsm` in the root
 of the invoices share. Its VBA code and buttons are already embedded; the Mac
@@ -30,6 +30,16 @@ mini user does not need to open the VBA editor or copy and paste any code.
   `IIf` failures, and restores Excel's global event state after errors.
 - Locks formulas and labels while leaving intended input cells editable.
 - Creates large bilingual Save, Print, and New Invoice buttons.
+- The Print button temporarily hides abandoned/empty item rows, opens the
+  native Print dialog with two-sided printing disabled, and then restores the
+  editable sheet. SAVE INVOICE already creates the archival PDF.
+- Blocks File -> Save As from starting the invoice-save workflow a second time;
+  users are directed to the Save Invoice or Print buttons instead.
+- Repairs the missing Sales Tax summary row and always calculates Total Invoice
+  as Subtotal plus Sales Tax, preventing Tire Labor from being counted twice.
+- Includes a private `ImportLegacyInvoiceV2` administrator macro that migrates
+  data into a clean V2 copy, verifies stable totals, backs up the original, and
+  replaces the selected old XLSM at the same path and filename.
 - Places buttons outside the A:E print area and sets their drawing
   `PrintObject` property to false, so they are excluded from paper and PDF.
 - Supports multiple printed pages while keeping the invoice one page wide.
@@ -53,16 +63,19 @@ Parts, Labor, Tires, then Road Service.
 
 | File | Destination |
 |---|---|
-| `Module1_V2.bas` | Import as a normal VBA module |
-| `Sheet1_Invoice_V2.bas` | Copy its event procedure into the **Invoice worksheet** code module |
-| `ThisWorkbook_V2.bas` | Copy its event procedures into the real **ThisWorkbook** code module |
-| `V2BuildInstaller.bas` | One-time build helper; not needed by invoice users |
+| `Module1.bas` | The one standard runtime module |
+| `Sheet1_Invoice.bas` | Code for the **Invoice worksheet** document module |
+| `ThisWorkbook.bas` | Code for the **ThisWorkbook** document module |
+
+The production VBA project intentionally contains only those three components.
+The legacy `Module1` and parallel `Module1_V2` must not coexist: the current
+code belongs in the single standard module named `Module1`.
 
 Workbook and worksheet event procedures cannot be activated merely by
 importing them as ordinary `.bas` modules. They must be placed in the two
 document modules shown above.
 
-### Updating `Module1_V2` in the workbook
+### Updating `Module1` in the workbook
 
 Editing this file does not change the workbook — the VBA is embedded in
 `Invoice_Template_Formatted_V2.xlsm` and must be re-imported.
@@ -71,14 +84,26 @@ Close the workbook everywhere first; an SMB lock will block the save. Then in
 Excel: **Tools → Macro → Visual Basic Editor**, and
 
 1. **File → Import File…**, press `Cmd-Shift-G`, type the full path to
-   `Module1_V2.bas`, and confirm. It arrives as `Module1_V21` because import
-   adds a component rather than replacing one.
-2. Select the old `Module1_V2` in the project tree, then **File → Remove
-   Module1_V2…** and answer **No** to the export prompt.
-3. Rename `Module1_V21` back to `Module1_V2` in the Properties pane.
+`Module1.bas`, and confirm. Remove the existing standard `Module1` first so
+the imported component keeps the correct name.
+2. Copy the short event procedures from `Sheet1_Invoice.bas` and
+`ThisWorkbook.bas` into their matching document modules.
+3. Confirm the project tree contains only `ThisWorkbook`, `Sheet1`, and
+`Module1`.
 4. **Debug → Compile VBAProject** — it must complete with no dialog.
-5. Run the `SaveTemplate` macro. Do not use a normal Save; `Workbook_BeforeSave`
+5. Run `InitializeInvoiceMakerV2` once so summary rows and formatting are
+   repaired, then run `SaveTemplateV2`. Do not use a normal Save; `Workbook_BeforeSave`
    redirects it into the invoice-save routine and refuses an incomplete invoice.
+
+### Upgrading one old invoice
+
+This is intentionally not exposed as a worksheet button. From the production
+template, press **Control+Option+F8**, run `ImportLegacyInvoiceV2`, and select
+the old `.xlsm`. When Mac Excel asks while the importer opens its read-only and
+staged copies, choose **Disable Macros**. Review the old/new total comparison
+and approve the replacement only if it is correct. The invoice number, invoice
+date, ship/due dates, data, path, and filename are retained. A hash-verified
+copy of the original is kept under `~/Desktop/Invoice Import Backups`.
 
 Do not paste the module with `Cmd-A`/`Cmd-V` through UI automation. If the code
 pane does not hold keyboard focus, macOS drops the Command modifier and types a
@@ -111,16 +136,15 @@ The helper must be installed at:
 ~/Library/Application Scripts/com.microsoft.Excel/InvoiceMakerV2.applescript
 ```
 
-That filename and location are fixed — `Module1_V2.bas` calls
+That filename and location are fixed — `Module1.bas` calls
 `AppleScriptTask("InvoiceMakerV2.applescript", ...)`. Install it for the same
 macOS account that runs Excel, without `sudo`; the folder is per-user and a
 root-owned copy will not be found.
 
-The helper exposes two handlers to the workbook: one that lists the customer
-folders on the share, and one that moves a staged `.xlsm` and `.pdf` into a
-customer's `Excel` and `PDF` folders. Copy files without preserving permission
-bits — SMB shares commonly reject `fchmod`, which fails the copy after the data
-has already been written.
+The helper lists customer folders, moves staged invoice/PDF pairs, controls
+temporary one-sided printer defaults, and performs verified legacy replacements.
+Copy files without preserving permission bits — SMB shares commonly reject
+`fchmod`, which fails the copy after the data has already been written.
 
 **Share access.** The user needs the `invoices` SMB share mounted, with the
 password stored in the macOS Keychain rather than in any script. A desktop

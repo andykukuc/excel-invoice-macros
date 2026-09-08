@@ -65,7 +65,7 @@ The ITEM column (B) drives sorting and the summary totals.
 
 ```
 v1/   original modules and their README
-v2/   current modules, build helper, and their README
+v2/   current three-module VBA project and its README
 ```
 
 The Mac deployment pieces (desktop launcher, SMB mount agent, sandbox helper)

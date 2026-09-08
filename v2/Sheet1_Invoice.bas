@@ -1,4 +1,4 @@
-Attribute VB_Name = "Sheet1_Invoice_V2"
+Attribute VB_Name = "Sheet1"
 Option Explicit
 
 ' Copy this procedure into the Invoice worksheet code module for V2.
