@@ -279,7 +279,7 @@ Public Sub SaveInvoiceV2()
     bV2InternalSave = False
 
     ' The saved XLSM keeps its colours; only the PDF is rendered in grey.
-    Set colourChanges = ApplyGrayscaleV2(PrintRangeV2(InvoiceSheetV2(outputBook)))
+    Set colourChanges = ApplyPrintLookV2(InvoiceSheetV2(outputBook))
     InvoiceSheetV2(outputBook).ExportAsFixedFormat _
         Type:=xlTypePDF, _
         Filename:=pdfPath, _
@@ -289,6 +289,9 @@ Public Sub SaveInvoiceV2()
         OpenAfterPublish:=False
     RestoreColoursV2 colourChanges
     Set colourChanges = Nothing
+    ' The restore puts the book back exactly as it was saved; without this
+    ' Windows Excel would ask to save the open invoice again on close.
+    outputBook.Saved = True
 
 #If Mac Then
     outputBook.Close SaveChanges:=False
@@ -687,8 +690,8 @@ Private Sub ImportLegacyInvoiceFromPathV2(ByVal presetPath As String)
     Application.StatusBar = "Creating the one-page PDF..."
     stagePdfPath = JoinPathV2(stageFolder, legacyBase & ".pdf")
     PrepareOutputCopyV2 stageBook
-    ' Never saved, so the greyscale conversion needs no restore here.
-    ApplyGrayscaleV2 PrintRangeV2(InvoiceSheetV2(stageBook))
+    ' Never saved, so the print look needs no restore here.
+    ApplyPrintLookV2 InvoiceSheetV2(stageBook)
     InvoiceSheetV2(stageBook).ExportAsFixedFormat _
         Type:=xlTypePDF, Filename:=stagePdfPath, Quality:=xlQualityStandard, _
         IncludeDocProperties:=True, IgnorePrintAreas:=False, OpenAfterPublish:=False
@@ -2258,7 +2261,7 @@ Public Sub PrintInvoiceV2()
     HideEmptyBucketsV2 ws
     ConfigurePageV2 ws
     ' Print in grey like the PDF; the colours come back once the dialog closes.
-    Set colourChanges = ApplyGrayscaleV2(PrintRangeV2(ws))
+    Set colourChanges = ApplyPrintLookV2(ws)
 
     If Not BeginOneSidedPrintingV2(printerRestoreToken, printerError) Then
         Err.Raise vbObjectError + 304, , printerError
@@ -3576,7 +3579,55 @@ Private Function ApplyGrayscaleV2(ByVal printRange As Range) As Collection
     Set ApplyGrayscaleV2 = changes
 End Function
 
-' Undoes ApplyGrayscaleV2, newest change first. Safe with Nothing.
+' Everything paper and PDF need beyond the page setup: greyscale colours and
+' a drawn rule at each page break. Returns the changes for RestoreColoursV2.
+Private Function ApplyPrintLookV2(ByVal ws As Worksheet) As Collection
+    Dim changes As Collection
+    Set changes = ApplyGrayscaleV2(PrintRangeV2(ws))
+    AddPageBreakRulesV2 ws, changes
+    Set ApplyPrintLookV2 = changes
+End Function
+
+' Excel leaves out the closing grid line under the framed QTY and AMOUNT
+' cells of the last row before a page break, whatever the border settings
+' (thin, medium and thick rules and thinner side frames all render the same);
+' ITEM, DESCRIPTION and UNIT PRICE keep theirs. Thin line shapes drawn under
+' just those two cells close the table on paper and in the PDF. The shapes
+' are temporary: RestoreColoursV2 deletes them again.
+Private Sub AddPageBreakRulesV2(ByVal ws As Worksheet, ByVal changes As Collection)
+    Dim pageBreak As HPageBreak
+    Dim rule As Shape
+    Dim column As Variant
+    Dim breakRow As Long
+    Dim lastRow As Long
+    Dim ruleTop As Double
+
+    On Error GoTo RulesUnavailable
+    lastRow = PrintLastRowV2(ws)
+    For Each pageBreak In ws.HPageBreaks
+        breakRow = pageBreak.Location.Row
+        If breakRow > LINEITEM_START And breakRow <= lastRow Then
+            ruleTop = ws.Rows(breakRow).Top - 0.4
+            For Each column In Array("A", "E")
+                With ws.Range(column & "1")
+                    Set rule = ws.Shapes.AddLine(.Left, ruleTop, .Left + .Width, ruleTop)
+                End With
+                rule.Line.ForeColor.RGB = RGB(180, 180, 180)
+                rule.Line.Weight = 0.75
+                rule.Placement = xlFreeFloating
+                changes.Add Array(rule, 4, 0, 0)
+            Next column
+        End If
+    Next pageBreak
+    Exit Sub
+
+RulesUnavailable:
+    ' Cosmetic only: output continues without the rule.
+    Err.Clear
+End Sub
+
+' Undoes ApplyPrintLookV2 / ApplyGrayscaleV2, newest change first. Safe with
+' Nothing.
 Private Sub RestoreColoursV2(ByVal changes As Collection)
     Dim index As Long
     Dim change As Variant
@@ -3588,6 +3639,7 @@ Private Sub RestoreColoursV2(ByVal changes As Collection)
             Case 1: change(0).Interior.Color = change(3)
             Case 2: change(0).Font.Color = change(3)
             Case 3: change(0).Borders(change(2)).Color = change(3)
+            Case 4: change(0).Delete
         End Select
     Next index
 End Sub
