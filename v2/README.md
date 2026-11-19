@@ -29,7 +29,8 @@ mini user does not need to open the VBA editor or copy and paste any code.
 - Qualifies workbook references, handles partially merged rows, avoids eager
   `IIf` failures, and restores Excel's global event state after errors.
 - Locks formulas and labels while leaving intended input cells editable.
-- Creates large bilingual Save, Print, and New Invoice buttons.
+- Creates large bilingual Save, Print, and New Invoice buttons, plus an
+  Import Invoice button on the production template only.
 - The Print button temporarily hides abandoned/empty item rows, opens the
   native Print dialog with two-sided printing disabled, and then restores the
   editable sheet. SAVE INVOICE already creates the archival PDF.
@@ -37,12 +38,19 @@ mini user does not need to open the VBA editor or copy and paste any code.
   users are directed to the Save Invoice or Print buttons instead.
 - Repairs the missing Sales Tax summary row and always calculates Total Invoice
   as Subtotal plus Sales Tax, preventing Tire Labor from being counted twice.
-- Includes a private `ImportLegacyInvoiceV2` administrator macro that migrates
-  data into a clean V2 copy, verifies stable totals, backs up the original, and
-  replaces the selected old XLSM at the same path and filename.
+- Includes an `ImportLegacyInvoiceV2` importer (the template's Import Invoice
+  button) that migrates data into a clean V2 copy, verifies stable totals,
+  backs up the original, replaces the selected old XLSM at the same path and
+  filename, and replaces its PDF with a freshly rendered one-page copy.
 - Places buttons outside the A:E print area and sets their drawing
   `PrintObject` property to false, so they are excluded from paper and PDF.
-- Supports multiple printed pages while keeping the invoice one page wide.
+- Prints on a single page whenever the invoice fits at 75% scale or larger
+  (roughly 20 line items). Longer invoices continue onto page two, still one
+  page wide. Item rows are one line tall and grow only for a wrapped
+  description.
+- Paper and PDF output are always black and white (Excel's Black and white
+  page setting): fills are dropped and text and borders print black. The
+  on-screen invoice keeps its colours.
 
 ## Line types
 
@@ -97,13 +105,26 @@ the imported component keeps the correct name.
 
 ### Upgrading one old invoice
 
-This is intentionally not exposed as a worksheet button. From the production
-template, press **Control+Option+F8**, run `ImportLegacyInvoiceV2`, and select
-the old `.xlsm`. When Mac Excel asks while the importer opens its read-only and
+On the production template, click **IMPORTUJ FAKTURĘ / IMPORT INVOICE** (or
+press **Control+Option+F8** and run `ImportLegacyInvoiceV2`), then select the
+old `.xlsm`. It works on V1 invoices and on earlier V2 saves alike. When Mac Excel asks while the importer opens its read-only and
 staged copies, choose **Disable Macros**. Review the old/new total comparison
 and approve the replacement only if it is correct. The invoice number, invoice
 date, ship/due dates, data, path, and filename are retained. A hash-verified
 copy of the original is kept under `~/Desktop/Invoice Import Backups`.
+
+The importer also renders a new one-page PDF and puts it in the customer's
+`PDF` folder under the invoice's own name (beside the XLSM when there is no
+`Excel`/`PDF` folder pair). An existing PDF of that name is backed up to the
+same Desktop folder first. The PDF is rendered before anything is replaced,
+so a rendering failure leaves the original untouched; a failure while placing
+it is reported as a warning, and running the import again retries it.
+
+Keep `Module1.bas` pure ASCII. The VBA editor imports `.bas` files in the
+legacy Mac Roman / Windows-1252 code page, not UTF-8, so a Polish letter typed
+directly in the source turns into junk characters (the Save button once read
+`ZAPISZ FAKTURƒò`). Write such letters as backslash-u escapes with four hex
+digits inside a string passed to `UnicodeTextV2`, as the button captions do.
 
 Do not paste the module with `Cmd-A`/`Cmd-V` through UI automation. If the code
 pane does not hold keyboard focus, macOS drops the Command modifier and types a
@@ -142,7 +163,10 @@ macOS account that runs Excel, without `sudo`; the folder is per-user and a
 root-owned copy will not be found.
 
 The helper lists customer folders, moves staged invoice/PDF pairs, controls
-temporary one-sided printer defaults, and performs verified legacy replacements.
+temporary one-sided printer defaults, performs verified legacy replacements,
+and places the re-rendered PDF of an imported invoice (`placeImportedPdf`).
+Reinstall the helper whenever `Module1` gains a new `AppleScriptTask` call;
+an older helper makes the importer report that the PDF was not updated.
 Copy files without preserving permission bits — SMB shares commonly reject
 `fchmod`, which fails the copy after the data has already been written.
 
@@ -164,11 +188,16 @@ current shortcut:
 2. Canceling the numbered customer prompt leaves the open invoice unchanged.
 3. Save creates one `.xlsm` under `Excel` and one `.pdf` under `PDF`.
 4. The PDF contains the full invoice but none of the three buttons.
-5. A long invoice continues onto page two and remains one page wide.
+5. An invoice of up to about 20 lines prints on one page; a longer one
+   continues onto page two and remains one page wide.
 6. Reboot the Mac mini, use the Desktop shortcut, and confirm that Finder uses
    the Keychain credential to reconnect the SMB share.
 7. A `Road Service` line multiplies qty by unit price and reaches the Subtotal
    without appearing in Parts, Labor, or Tire Labor Total.
+8. Paper and PDF output are black and white.
+9. The button captions show Polish letters correctly (`ZAPISZ FAKTURĘ`).
+10. Import Invoice on the template upgrades a test invoice and replaces its
+    PDF with a one-page copy, backing up both originals.
 
 ## Known issues
 

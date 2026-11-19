@@ -15,6 +15,17 @@ Private lV2FormattedItemRows As Long
 Private Const INVOICE_SHEET As String = "Invoice"
 Private Const LINEITEM_START As Long = 15
 Private Const STANDARD_ITEM_ROWS As Long = 4
+' Print layout. Item rows hold one line at a compact height so a typical
+' invoice prints on a single page; a description long enough to wrap grows
+' only its own row instead of every row reserving room for several lines.
+Private Const ITEM_ROW_HEIGHT As Double = 22
+Private Const SUMMARY_ROW_HEIGHT As Double = 22
+Private Const PAGE_WIDTH_INCHES As Double = 8.5
+Private Const PAGE_HEIGHT_INCHES As Double = 11
+Private Const PAGE_MARGIN_INCHES As Double = 0.5
+' Shrink an invoice onto one page only while the text stays readable. Below
+' this scale a long invoice continues onto page two (still one page wide).
+Private Const MIN_ONE_PAGE_SCALE As Double = 0.75
 Private Const REPAIR_DESCRIPTION As String = "Repair Labor @ $80.00/hr"
 Private Const TIRE_DESCRIPTION As String = "Install Tire Labor @ $50.00/hr"
 Private Const REPAIR_RATE As Double = 80
@@ -176,7 +187,8 @@ Public Sub SaveInvoiceV2()
     invoiceRoot = ResolveInvoiceRootV2(sourceBook)
     If invoiceRoot = "" Then
         MsgBox "The invoices share is not available." & vbCrLf & vbCrLf & _
-               "Uruchom ponownie skrót Invoice Maker po połączeniu z siecią.", _
+               UnicodeTextV2("Uruchom ponownie skr\u00F3t Invoice Maker po " & _
+                             "po\u0142\u0105czeniu z sieci\u0105."), _
                vbExclamation, "Invoices Share Not Available"
         Exit Sub
     End If
@@ -381,8 +393,13 @@ Public Sub ImportLegacyInvoiceV2()
     Dim stageSheet As Worksheet
     Dim stageFolder As String
     Dim stagePath As String
+    Dim stagePdfPath As String
     Dim finalPath As String
+    Dim finalPdfPath As String
     Dim backupPath As String
+    Dim pdfBackupPath As String
+    Dim pdfError As String
+    Dim pdfPlaced As Boolean
     Dim helperError As String
     Dim validationError As String
     Dim comparisonText As String
@@ -538,7 +555,8 @@ Public Sub ImportLegacyInvoiceV2()
         "Invoice date: " & ImportedDateTextV2(invoiceData.InvoiceDate) & _
         vbCrLf & vbCrLf & comparisonText & vbCrLf & _
         "The original XLSM will be replaced at the same path and filename." & _
-        vbCrLf & "A verified recovery backup will be kept on your Desktop." & _
+        vbCrLf & "A fresh one-page PDF will replace the customer's matching PDF." & _
+        vbCrLf & "Verified recovery backups of both will be kept on your Desktop." & _
         vbCrLf & vbCrLf & "Continue?", _
         vbYesNo + vbExclamation + vbDefaultButton2, _
         "Replace Old Invoice With V2?") <> vbYes Then
@@ -563,6 +581,17 @@ Public Sub ImportLegacyInvoiceV2()
         IgnoreReadOnlyRecommended:=True, Notify:=False)
     Set stageSheet = InvoiceSheetV2(stageBook)
     ValidateSavedStageV2 stageSheet, invoiceData
+
+    ' The saved XLSM keeps its editable blank rows. Render the PDF from this
+    ' read-only in-memory copy, prepared exactly as SAVE INVOICE prepares its
+    ' output, and never save it. Doing this before the replacement means a PDF
+    ' failure leaves the original invoice untouched.
+    Application.StatusBar = "Creating the one-page PDF..."
+    stagePdfPath = JoinPathV2(stageFolder, legacyBase & ".pdf")
+    PrepareOutputCopyV2 stageBook
+    InvoiceSheetV2(stageBook).ExportAsFixedFormat _
+        Type:=xlTypePDF, Filename:=stagePdfPath, Quality:=xlQualityStandard, _
+        IncludeDocProperties:=True, IgnorePrintAreas:=False, OpenAfterPublish:=False
     stageBook.Close SaveChanges:=False
     Set stageBook = Nothing
     Set stageSheet = Nothing
@@ -573,6 +602,12 @@ Public Sub ImportLegacyInvoiceV2()
         Err.Raise vbObjectError + 343, , helperError
     End If
     importCompleted = True
+
+    ' The upgraded XLSM is already in place. A PDF problem from here on is a
+    ' warning, not a failed import: running the import again retries it.
+    Application.StatusBar = "Placing the PDF in the customer folder..."
+    pdfPlaced = PlaceImportedPdfV2(stagePdfPath, finalPath, finalPdfPath, _
+                                   pdfBackupPath, pdfError)
     GoTo ImportFinish
 
 ImportCancelled:
@@ -580,6 +615,7 @@ ImportCancelled:
     If Not stageBook Is Nothing Then stageBook.Close SaveChanges:=False
     Set stageBook = Nothing
     If stagePath <> "" And FileExistsV2(stagePath) Then Kill stagePath
+    If stagePdfPath <> "" And FileExistsV2(stagePdfPath) Then Kill stagePdfPath
     If stageFolder <> "" And FolderExistsV2(stageFolder) Then RmDir stageFolder
     On Error GoTo 0
     GoTo ImportFinish
@@ -615,23 +651,36 @@ ImportFinish:
 
     If importCompleted Then
         On Error Resume Next
+        If stagePdfPath <> "" And FileExistsV2(stagePdfPath) Then Kill stagePdfPath
         If stageFolder <> "" And FolderExistsV2(stageFolder) Then RmDir stageFolder
         On Error GoTo 0
 
-        MsgBox "The old invoice was upgraded successfully." & vbCrLf & vbCrLf & _
-               "Updated file:" & vbCrLf & finalPath & vbCrLf & vbCrLf & _
-               "Recovery backup:" & vbCrLf & backupPath, _
-               vbInformation, "Legacy Invoice Upgraded"
+        If pdfPlaced Then
+            MsgBox "The old invoice was upgraded successfully." & vbCrLf & vbCrLf & _
+                   "Updated file:" & vbCrLf & finalPath & vbCrLf & vbCrLf & _
+                   "New PDF:" & vbCrLf & finalPdfPath & vbCrLf & vbCrLf & _
+                   "Recovery backups:" & vbCrLf & backupPath & _
+                   IIf(pdfBackupPath <> "", vbCrLf & pdfBackupPath, ""), _
+                   vbInformation, "Legacy Invoice Upgraded"
+        Else
+            MsgBox "The invoice was upgraded, but its PDF was not updated." & _
+                   vbCrLf & vbCrLf & "Updated file:" & vbCrLf & finalPath & _
+                   vbCrLf & vbCrLf & "Recovery backup:" & vbCrLf & backupPath & _
+                   vbCrLf & vbCrLf & "Run the import again on the same file to " & _
+                   "retry the PDF." & vbCrLf & vbCrLf & pdfError, _
+                   vbExclamation, "Invoice Upgraded, PDF Not Updated"
+        End If
         Exit Sub
     End If
 
     If importErrorDescription <> "" Then
         If stageReady And stagePath <> "" And FileExistsV2(stagePath) Then
-            recoveredPath = RecoverStagedInvoiceV2(stagePath, "", _
+            recoveredPath = RecoverStagedInvoiceV2(stagePath, stagePdfPath, _
                                                    legacyBase & "_V2_recovery")
             If recoveredPath <> "" Then
                 On Error Resume Next
                 Kill stagePath
+                If stagePdfPath <> "" And FileExistsV2(stagePdfPath) Then Kill stagePdfPath
                 If stageFolder <> "" And FolderExistsV2(stageFolder) Then RmDir stageFolder
                 On Error GoTo 0
             End If
@@ -1672,6 +1721,43 @@ HelperError:
 #End If
 End Function
 
+' Hands the rendered PDF of an upgraded invoice to the Mac helper, which puts
+' it in the customer's PDF folder under the invoice's own base name, backing up
+' any existing PDF first. Returns False with errorMessage set; never raises.
+Private Function PlaceImportedPdfV2(ByVal stagedPdfPath As String, _
+                                    ByVal invoicePath As String, _
+                                    ByRef finalPdfPath As String, _
+                                    ByRef pdfBackupPath As String, _
+                                    ByRef errorMessage As String) As Boolean
+#If Mac Then
+    Dim delimiter As String
+    Dim helperResult As String
+    Dim resultParts As Variant
+
+    On Error GoTo HelperError
+    delimiter = Chr$(30)
+    helperResult = AppleScriptTask("InvoiceMakerV2.applescript", "placeImportedPdf", _
+                                   stagedPdfPath & delimiter & invoicePath)
+    resultParts = Split(helperResult, delimiter)
+    If UBound(resultParts) >= 2 And resultParts(0) = "OK" Then
+        finalPdfPath = Trim$(CStr(resultParts(1)))
+        pdfBackupPath = Trim$(CStr(resultParts(2)))
+        PlaceImportedPdfV2 = (finalPdfPath <> "")
+        If Not PlaceImportedPdfV2 Then errorMessage = "The Mac helper returned no PDF path."
+        Exit Function
+    End If
+    If UBound(resultParts) >= 1 Then errorMessage = resultParts(1)
+    If errorMessage = "" Then errorMessage = "The Mac helper returned no PDF result."
+    Exit Function
+HelperError:
+    errorMessage = "The Mac invoice helper is missing or out of date (it needs " & _
+                   "placeImportedPdf). Run the Mac installer again." & _
+                   vbCrLf & vbCrLf & Err.Description
+#Else
+    errorMessage = "PDF replacement is currently supported on macOS only."
+#End If
+End Function
+
 Public Sub PrintInvoiceV2()
     Dim ws As Worksheet
     Dim oldEvents As Boolean
@@ -1811,7 +1897,8 @@ Public Sub ResetTemplateV2(Optional ByVal skipConfirm As Boolean = False)
     If Not skipConfirm Then
         If MsgBox("Start a new invoice?" & vbCrLf & _
                   "All unsaved information on this invoice will be cleared." & vbCrLf & vbCrLf & _
-                  "Rozpocząć nową fakturę?", vbYesNo + vbExclamation + vbDefaultButton2, _
+                  UnicodeTextV2("Rozpocz\u0105\u0107 now\u0105 faktur\u0119?"), _
+                  vbYesNo + vbExclamation + vbDefaultButton2, _
                   "Nowa faktura / New Invoice") <> vbYes Then Exit Sub
     End If
 
@@ -1866,6 +1953,7 @@ Public Sub ResetTemplateV2(Optional ByVal skipConfirm As Boolean = False)
     resetStep = "creating the invoice number and date"
     ws.Cells(2, 5).Value = NextInvoiceNumberV2()
     ws.Cells(3, 5).Value = Date
+    ws.Cells(3, 5).NumberFormat = "m/d/yy"
     ws.Cells(4, 5).Value = 1
 
     resetStep = "updating invoice calculations"
@@ -2010,6 +2098,7 @@ End Sub
 Private Sub EnsureButtonsPresentV2(ByVal targetBook As Workbook)
     Dim ws As Worksheet
     Dim actionPrefix As String
+    Dim buttonName As Variant
 
     On Error GoTo ButtonsMissing
     Set ws = InvoiceSheetV2(targetBook)
@@ -2018,13 +2107,23 @@ Private Sub EnsureButtonsPresentV2(ByVal targetBook As Workbook)
     ws.Shapes("btnV2Save").OnAction = actionPrefix & "SaveInvoiceV2"
     ws.Shapes("btnV2Print").OnAction = actionPrefix & "PrintInvoiceV2"
     ws.Shapes("btnV2New").OnAction = actionPrefix & "NewInvoiceV2"
-    ws.Shapes("btnV2Print").AlternativeText = "DRUKUJ" & vbLf & "PRINT"
-    ws.Shapes("btnV2Print").TextFrame2.TextRange.Text = "DRUKUJ" & vbLf & "PRINT"
+    If IsTemplateWorkbookV2(targetBook) Then
+        ws.Shapes("btnV2Import").OnAction = actionPrefix & "ImportLegacyInvoiceV2"
+    Else
+        DeleteShapeIfPresentV2 ws, "btnV2Import"
+    End If
+
+    ' Rewrite every caption on open. Workbooks built by earlier imports of this
+    ' module carry garbled Polish button text that nothing else repairs.
+    For Each buttonName In ButtonNamesV2(targetBook)
+        ws.Shapes(buttonName).AlternativeText = ButtonCaptionV2(CStr(buttonName))
+        ws.Shapes(buttonName).TextFrame2.TextRange.Text = ButtonCaptionV2(CStr(buttonName))
+    Next buttonName
 
     On Error Resume Next
-    ws.DrawingObjects("btnV2Save").PrintObject = False
-    ws.DrawingObjects("btnV2Print").PrintObject = False
-    ws.DrawingObjects("btnV2New").PrintObject = False
+    For Each buttonName In ButtonNamesV2(targetBook)
+        ws.DrawingObjects(buttonName).PrintObject = False
+    Next buttonName
     On Error GoTo 0
     Exit Sub
 
@@ -2044,19 +2143,50 @@ Private Sub InstallButtonsOnWorkbookV2(ByVal targetBook As Workbook)
     DeleteShapeIfPresentV2 ws, "btnV2Save"
     DeleteShapeIfPresentV2 ws, "btnV2Print"
     DeleteShapeIfPresentV2 ws, "btnV2New"
+    DeleteShapeIfPresentV2 ws, "btnV2Import"
 
-    AddButtonV2 ws, "btnV2Save", "ZAPISZ FAKTURĘ" & vbLf & "SAVE INVOICE", _
+    AddButtonV2 ws, "btnV2Save", ButtonCaptionV2("btnV2Save"), _
                 actionPrefix & "SaveInvoiceV2", ws.Range("G2").Left, ws.Range("G2").Top, _
                 RGB(45, 125, 70)
-    AddButtonV2 ws, "btnV2Print", "DRUKUJ" & vbLf & "PRINT", _
+    AddButtonV2 ws, "btnV2Print", ButtonCaptionV2("btnV2Print"), _
                 actionPrefix & "PrintInvoiceV2", ws.Range("G6").Left, ws.Range("G6").Top, _
                 RGB(43, 102, 176)
-    AddButtonV2 ws, "btnV2New", "NOWA FAKTURA" & vbLf & "NEW INVOICE", _
+    AddButtonV2 ws, "btnV2New", ButtonCaptionV2("btnV2New"), _
                 actionPrefix & "NewInvoiceV2", ws.Range("G10").Left, ws.Range("G10").Top, _
                 RGB(181, 64, 64)
+    ' The importer runs only from the production template. On a saved invoice
+    ' the button could do nothing but refuse, so it is not added there.
+    If IsTemplateWorkbookV2(targetBook) Then
+        AddButtonV2 ws, "btnV2Import", ButtonCaptionV2("btnV2Import"), _
+                    actionPrefix & "ImportLegacyInvoiceV2", ws.Range("G14").Left, _
+                    ws.Range("G14").Top, RGB(96, 80, 140)
+    End If
 
     ProtectInvoiceV2 ws
 End Sub
+
+Private Function ButtonNamesV2(ByVal targetBook As Workbook) As Variant
+    If IsTemplateWorkbookV2(targetBook) Then
+        ButtonNamesV2 = Array("btnV2Save", "btnV2Print", "btnV2New", "btnV2Import")
+    Else
+        ButtonNamesV2 = Array("btnV2Save", "btnV2Print", "btnV2New")
+    End If
+End Function
+
+' One source for every button label, so installing and the open-time refresh
+' always agree. Polish letters go through UnicodeTextV2; see its comment.
+Private Function ButtonCaptionV2(ByVal buttonName As String) As String
+    Select Case buttonName
+        Case "btnV2Save"
+            ButtonCaptionV2 = UnicodeTextV2("ZAPISZ FAKTUR\u0118") & vbLf & "SAVE INVOICE"
+        Case "btnV2Print"
+            ButtonCaptionV2 = "DRUKUJ" & vbLf & "PRINT"
+        Case "btnV2New"
+            ButtonCaptionV2 = "NOWA FAKTURA" & vbLf & "NEW INVOICE"
+        Case "btnV2Import"
+            ButtonCaptionV2 = UnicodeTextV2("IMPORTUJ FAKTUR\u0118") & vbLf & "IMPORT INVOICE"
+    End Select
+End Function
 
 Private Sub AddButtonV2(ByVal ws As Worksheet, ByVal buttonName As String, _
                         ByVal caption As String, ByVal macroName As String, _
@@ -2225,8 +2355,10 @@ Private Function SortKeyV2(ByVal tag As String, ByVal description As String) As 
         Case "parts": result = 100
         Case "labor", "install": result = 200
         Case "tires": result = 300
-        Case "road service": result = 350
-        Case Else: result = 400
+        ' Road Service sorts after the Tires group's +90 rate anchor (390).
+        ' At 350 it landed between Tires detail lines and their rate row.
+        Case "road service": result = 400
+        Case Else: result = 500
     End Select
     If StrComp(description, REPAIR_DESCRIPTION, vbTextCompare) = 0 Then result = result + 90
     If StrComp(description, TIRE_DESCRIPTION, vbTextCompare) = 0 Then result = result + 90
@@ -2464,11 +2596,14 @@ Public Sub FormatInvoiceV2(ByVal ws As Worksheet, _
     ws.Range("A15:E15").Copy
     ws.Range("A15:E" & lastItemRow).PasteSpecial Paste:=xlPasteFormats
     Application.CutCopyMode = False
-    ws.Rows(LINEITEM_START & ":" & lastItemRow).RowHeight = 44
 
     ws.Range("D15:E" & lastItemRow).NumberFormat = "$#,##0.00"
-    ws.Range("A15:A" & lastItemRow).NumberFormat = "0.##"
+    ' "0.##" printed whole quantities with a trailing point ("9."). General
+    ' shows 9 and 1.5 both as typed.
+    ws.Range("A15:A" & lastItemRow).NumberFormat = "General"
     AlignLineItemsV2 ws, subtotalRow
+    ' After AlignLineItemsV2: AutoFit needs WrapText already set on B:C.
+    SizeItemRowsV2 ws, lastItemRow
 
     ' Build the two banding groups and colour each in a single write instead of
     ' one Interior.Color crossing per row.
@@ -2494,8 +2629,25 @@ Public Sub FormatInvoiceV2(ByVal ws As Worksheet, _
     ApplyLineTypeValidationV2 ws.Range("B15:B" & lastItemRow), separator
 
     Set dueCell = FindLabelV2(ws, "Total Due", xlPart)
-    If Not dueCell Is Nothing Then ws.Rows(subtotalRow & ":" & dueCell.Row).RowHeight = 22
+    If Not dueCell Is Nothing Then ws.Rows(subtotalRow & ":" & dueCell.Row).RowHeight = SUMMARY_ROW_HEIGHT
     lV2FormattedItemRows = itemRowCount
+End Sub
+
+' One line of text per item row at a fixed compact height. AutoFit lets a
+' wrapped description take the extra lines it needs; the floor keeps short
+' rows from collapsing to Excel's bare text height.
+Private Sub SizeItemRowsV2(ByVal ws As Worksheet, ByVal lastItemRow As Long)
+    Dim rowNumber As Long
+
+    With ws.Rows(LINEITEM_START & ":" & lastItemRow)
+        .RowHeight = ITEM_ROW_HEIGHT
+        .AutoFit
+    End With
+    For rowNumber = LINEITEM_START To lastItemRow
+        If ws.Rows(rowNumber).RowHeight < ITEM_ROW_HEIGHT Then
+            ws.Rows(rowNumber).RowHeight = ITEM_ROW_HEIGHT
+        End If
+    Next rowNumber
 End Sub
 
 ' Workbook view state is stored inside each XLSM. A template saved while zoomed
@@ -2550,16 +2702,16 @@ Public Sub AlignLineItemsV2(ByVal ws As Worksheet, _
 
     With ws.Range("A15:A" & subtotalRow - 1)
         .HorizontalAlignment = xlCenter
-        .VerticalAlignment = xlBottom
+        .VerticalAlignment = xlCenter
     End With
     With ws.Range("B15:C" & subtotalRow - 1)
         .HorizontalAlignment = xlLeft
-        .VerticalAlignment = xlBottom
+        .VerticalAlignment = xlCenter
         .WrapText = True
     End With
     With ws.Range("D15:E" & subtotalRow - 1)
         .HorizontalAlignment = xlRight
-        .VerticalAlignment = xlBottom
+        .VerticalAlignment = xlCenter
     End With
 End Sub
 
@@ -2725,17 +2877,46 @@ Private Sub ConfigurePageV2(ByVal ws As Worksheet)
         .PrintArea = "A1:E" & lastRow
         .Orientation = xlPortrait
         .PaperSize = xlPaperLetter
-        .LeftMargin = Application.InchesToPoints(0.5)
-        .RightMargin = Application.InchesToPoints(0.5)
-        .TopMargin = Application.InchesToPoints(0.5)
-        .BottomMargin = Application.InchesToPoints(0.5)
-        .FitToPagesWide = 1
-        .FitToPagesTall = False
+        .LeftMargin = Application.InchesToPoints(PAGE_MARGIN_INCHES)
+        .RightMargin = Application.InchesToPoints(PAGE_MARGIN_INCHES)
+        .TopMargin = Application.InchesToPoints(PAGE_MARGIN_INCHES)
+        .BottomMargin = Application.InchesToPoints(PAGE_MARGIN_INCHES)
         .Zoom = False
+        .FitToPagesWide = 1
+        If FitsOnePageReadablyV2(ws.Range("A1:E" & lastRow)) Then
+            .FitToPagesTall = 1
+        Else
+            .FitToPagesTall = False
+        End If
         .CenterHorizontally = True
         .PrintGridlines = False
+        ' Paper and PDF are always black and white: Excel drops cell fills and
+        ' prints text and borders black, so white-on-navy headings stay legible
+        ' and nothing uses colour ink. The on-screen invoice keeps its colours.
+        .BlackAndWhite = True
     End With
 End Sub
+
+' True when squeezing the print area onto one sheet keeps it readable.
+' Range.Height already excludes hidden rows, so the empty rate rows hidden
+' for printing do not count against the page.
+Private Function FitsOnePageReadablyV2(ByVal printRange As Range) As Boolean
+    Dim widthScale As Double
+    Dim heightScale As Double
+
+    If printRange.Width <= 0 Or printRange.Height <= 0 Then Exit Function
+    widthScale = Application.InchesToPoints(PAGE_WIDTH_INCHES - 2 * PAGE_MARGIN_INCHES) / _
+                 printRange.Width
+    If widthScale > 1 Then widthScale = 1
+    heightScale = Application.InchesToPoints(PAGE_HEIGHT_INCHES - 2 * PAGE_MARGIN_INCHES) / _
+                  printRange.Height
+
+    ' Fitting one page wide already sets widthScale. If the height fits at
+    ' that scale, one page costs nothing extra; otherwise allow the extra
+    ' shrink only down to the readable floor.
+    FitsOnePageReadablyV2 = (heightScale >= widthScale) Or _
+                            (heightScale >= MIN_ONE_PAGE_SCALE)
+End Function
 
 Public Sub HideEmptyBucketsV2(ByVal ws As Worksheet)
     Dim subtotalRow As Long
@@ -3106,6 +3287,28 @@ End Function
 
 Private Function IsTemplateWorkbookV2(ByVal wb As Workbook) As Boolean
     IsTemplateWorkbookV2 = (InStr(1, wb.Name, TEMPLATE_TOKEN, vbTextCompare) > 0)
+End Function
+
+' The VBA editor reads an imported .bas file in the machine's legacy code page
+' (Mac Roman or Windows-1252), not UTF-8, so a Polish letter typed directly in
+' this source arrives garbled: the Save button's "FAKTUR\u0118" printed with two
+' junk characters in place of the final letter. Keep this module pure ASCII:
+' write each non-ASCII character as a backslash, "u" and four hex digits, as
+' in the button captions, and pass the string through this function.
+Private Function UnicodeTextV2(ByVal escapedText As String) As String
+    Dim result As String
+    Dim startPos As Long
+    Dim hitPos As Long
+
+    startPos = 1
+    hitPos = InStr(startPos, escapedText, "\u", vbBinaryCompare)
+    Do While hitPos > 0
+        result = result & Mid$(escapedText, startPos, hitPos - startPos) & _
+                 ChrW$(CLng("&H" & Mid$(escapedText, hitPos + 2, 4)))
+        startPos = hitPos + 6
+        hitPos = InStr(startPos, escapedText, "\u", vbBinaryCompare)
+    Loop
+    UnicodeTextV2 = result & Mid$(escapedText, startPos)
 End Function
 
 Private Sub ClearSummaryInputV2(ByVal ws As Worksheet, ByVal labelText As String)

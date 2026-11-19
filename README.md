@@ -43,8 +43,10 @@ differences:
   an `AppleScriptTask` helper outside the sandbox.
 - **Error recovery.** V1 could leave `EnableEvents` off after a failure, making
   Excel appear permanently broken. V2 restores global state on every path.
-- **Buttons.** Large bilingual Save, Print, and New Invoice buttons, excluded
-  from both paper and PDF output.
+- **Buttons.** Large bilingual Save, Print, and New Invoice buttons, plus
+  Import Invoice on the template, all excluded from paper and PDF output.
+- **One-page, black-and-white output.** Compact item rows and fit-to-page
+  keep typical invoices on a single sheet; paper and PDF print without colour.
 - **Road Service line type**, alongside Parts, Labor, and Tires.
 
 Full details in [`v2/README.md`](v2/README.md).
