@@ -3406,14 +3406,8 @@ Private Sub ConfigurePageV2(ByVal ws As Worksheet)
         .FitToPagesWide = 1
         If onePage Then
             .FitToPagesTall = 1
-            .PrintTitleRows = ""
-            .CenterFooter = ""
         Else
-            ' Full size over several pages: repeat the column headings on
-            ' every page and number the pages.
             .FitToPagesTall = False
-            .PrintTitleRows = "$" & (LINEITEM_START - 1) & ":$" & (LINEITEM_START - 1)
-            .CenterFooter = "Page &P of &N"
         End If
         .CenterHorizontally = True
         .PrintGridlines = False
@@ -3422,6 +3416,22 @@ Private Sub ConfigurePageV2(ByVal ws As Worksheet)
         ' greyscale by ApplyGrayscaleV2 just before output.
         .BlackAndWhite = False
     End With
+
+    ' Multi-page output repeats the column headings and numbers the pages.
+    ' Cosmetic: a platform that rejects either setting must not stop Save
+    ' or Print.
+    On Error Resume Next
+    With ws.PageSetup
+        If onePage Then
+            .PrintTitleRows = ""
+            .CenterFooter = ""
+        Else
+            .PrintTitleRows = "$" & (LINEITEM_START - 1) & ":$" & (LINEITEM_START - 1)
+            .CenterFooter = "Page &P of &N"
+        End If
+    End With
+    Err.Clear
+    On Error GoTo 0
     If Not onePage Then
         SpreadItemRowsV2 ws, lastRow
         KeepTotalsTogetherV2 ws, lastRow
@@ -3494,14 +3504,18 @@ Private Sub SpreadItemRowsV2(ByVal ws As Worksheet, ByVal lastRow As Long)
     Next rowNumber
 End Sub
 
-' Excel's own page break can split the totals block or leave TOTAL DUE alone
-' on the last page. Break before the last two line items instead, so the next
-' page starts with item rows and carries the whole totals block. The fit
-' estimate keeps a safety margin so this manual break always lands before
-' Excel's natural one. Cosmetic only: a failure here never stops output.
+' Excel's own page breaks can split the totals block or leave TOTAL DUE alone
+' on the last page. Place every break by hand instead, each with a safety
+' margin so it always lands before Excel's natural one (and leaves room for
+' the 2pt print spacer), and never let a break fall inside the last two line
+' items, so the final page starts with item rows and carries the whole totals
+' block. Every page after the first also carries the repeated heading row.
+' Cosmetic only: a failure here never stops output.
 Private Sub KeepTotalsTogetherV2(ByVal ws As Worksheet, ByVal lastRow As Long)
     Const SAFETY_POINTS As Double = 36
     Dim subtotalRow As Long
+    Dim latestBreak As Long
+    Dim previousBreak As Long
     Dim pageCapacity As Double
     Dim usedHeight As Double
     Dim rowNumber As Long
@@ -3510,28 +3524,51 @@ Private Sub KeepTotalsTogetherV2(ByVal ws As Worksheet, ByVal lastRow As Long)
     On Error GoTo BreakUnavailable
     subtotalRow = FindSubtotalRowV2(ws)
     If subtotalRow <= LINEITEM_START + 2 Then Exit Sub
+    latestBreak = LastVisibleItemsStartV2(ws, subtotalRow, 2)
 
     pageCapacity = Application.InchesToPoints(PAGE_HEIGHT_INCHES - 2 * PAGE_MARGIN_INCHES) / _
                    PrintWidthScaleV2(ws) - SAFETY_POINTS
 
     ' Hidden rows report a height of 0, so they do not count.
-    breakRow = lastRow + 1
-    For rowNumber = 1 To lastRow
+    rowNumber = 1
+    Do While rowNumber <= lastRow
         usedHeight = usedHeight + ws.Rows(rowNumber).Height
         If usedHeight > pageCapacity Then
             breakRow = rowNumber
-            Exit For
+            If breakRow > latestBreak Then breakRow = latestBreak
+            If breakRow <= LINEITEM_START Or breakRow <= previousBreak Then Exit Sub
+            ws.HPageBreaks.Add Before:=ws.Rows(breakRow)
+            previousBreak = breakRow
+            ' Breaking at the last two items puts the rest on one final page.
+            If breakRow = latestBreak Then Exit Sub
+            usedHeight = ws.Rows(LINEITEM_START - 1).Height
+            rowNumber = breakRow
+        Else
+            rowNumber = rowNumber + 1
         End If
-    Next rowNumber
-    If breakRow > lastRow Then Exit Sub
-    If breakRow > subtotalRow - 2 Then breakRow = subtotalRow - 2
-    If breakRow <= LINEITEM_START Then Exit Sub
-    ws.HPageBreaks.Add Before:=ws.Rows(breakRow)
+    Loop
     Exit Sub
 
 BreakUnavailable:
     Err.Clear
 End Sub
+
+' First row of the last itemCount visible item rows above the subtotal, so
+' rows hidden for printing never count as items.
+Private Function LastVisibleItemsStartV2(ByVal ws As Worksheet, ByVal subtotalRow As Long, _
+                                         ByVal itemCount As Long) As Long
+    Dim rowNumber As Long
+    Dim found As Long
+
+    LastVisibleItemsStartV2 = subtotalRow
+    For rowNumber = subtotalRow - 1 To LINEITEM_START Step -1
+        If Not ws.Rows(rowNumber).Hidden Then
+            found = found + 1
+            LastVisibleItemsStartV2 = rowNumber
+            If found = itemCount Then Exit Function
+        End If
+    Next rowNumber
+End Function
 
 ' Converts every fill, font and border colour in printRange to the grey of
 ' the same brightness, so paper and PDF keep the invoice's bands, headings
@@ -3543,13 +3580,18 @@ Private Function ApplyGrayscaleV2(ByVal printRange As Range, _
     Dim cell As Range
     Dim edge As Variant
     Dim colourValue As Variant
+    Dim isAnchor As Boolean
 
     If changes Is Nothing Then Set changes = New Collection
     For Each cell In printRange.Cells
         ' A merged area shows its first cell's fill and font. Change only that
         ' cell: writing the whole MergeArea would also fill the hidden member
-        ' cells, and the restore could not tell them apart afterwards.
-        If cell.Address = cell.MergeArea.Cells(1, 1).Address Then
+        ' cells, and the restore could not tell them apart afterwards. The
+        ' address comparison only runs for merged cells, since every object
+        ' call is slow on Mac Excel.
+        isAnchor = True
+        If cell.MergeCells Then isAnchor = (cell.Address = cell.MergeArea.Cells(1, 1).Address)
+        If isAnchor Then
             If cell.Interior.Pattern <> xlNone Then
                 colourValue = cell.Interior.Color
                 If GrayOfV2(colourValue) <> colourValue Then
@@ -3583,11 +3625,27 @@ End Function
 ' Everything paper and PDF need beyond the page setup: a spacer row at each
 ' page break, then greyscale colours. Returns the changes for
 ' RestoreColoursV2, which undoes them newest first (colours, then spacers).
+' If anything fails part-way, the changes already made are undone before the
+' error is passed on, so the caller never holds a half-grey sheet or spacer
+' rows it has no record of.
 Private Function ApplyPrintLookV2(ByVal ws As Worksheet) As Collection
     Dim changes As New Collection
+    Dim lookErrorNumber As Long
+    Dim lookErrorDescription As String
+
+    On Error GoTo LookFailed
     AddPageBreakSpacersV2 ws, changes
     ApplyGrayscaleV2 PrintRangeV2(ws), changes
     Set ApplyPrintLookV2 = changes
+    Exit Function
+
+LookFailed:
+    lookErrorNumber = Err.Number
+    lookErrorDescription = Err.Description
+    On Error Resume Next
+    RestoreColoursV2 changes
+    On Error GoTo 0
+    Err.Raise lookErrorNumber, , lookErrorDescription
 End Function
 
 ' Excel leaves out the closing grid line under the framed QTY and AMOUNT
@@ -3619,10 +3677,14 @@ Private Sub AddPageBreakSpacersV2(ByVal ws As Worksheet, ByVal changes As Collec
     If breakCount = 0 Then Exit Sub
 
     ws.ResetAllPageBreaks
-    ' Bottom-up, so each insert leaves the rows of the breaks above in place.
-    For index = breakCount To 1 Step -1
-        spacerRow = breakRows(index)
+    ' Top-down: spacer k goes in at its break row moved down by the k-1
+    ' spacers above it, and every later insert lands below it. Its row is
+    ' therefore final when recorded, so even a failure further on leaves
+    ' RestoreColoursV2 an exact list of spacers to remove.
+    For index = 1 To breakCount
+        spacerRow = breakRows(index) + index - 1
         ws.Rows(spacerRow).Insert Shift:=xlDown, CopyOrigin:=xlFormatFromLeftOrAbove
+        changes.Add Array(ws, 5, spacerRow, 0)
         ws.Rows(spacerRow).RowHeight = SPACER_HEIGHT
         With ws.Range("A" & spacerRow & ":E" & spacerRow)
             .Interior.Pattern = xlNone
@@ -3631,11 +3693,10 @@ Private Sub AddPageBreakSpacersV2(ByVal ws As Worksheet, ByVal changes As Collec
         End With
     Next index
 
-    ' Break k now sits k rows lower, below its own spacer, so each spacer
-    ' ends the earlier page.
+    ' Each break goes just below its own spacer, so the spacer ends the
+    ' earlier page.
     For index = 1 To breakCount
         ws.HPageBreaks.Add Before:=ws.Rows(breakRows(index) + index)
-        changes.Add Array(ws, 5, breakRows(index) + index - 1, 0)
     Next index
     Exit Sub
 
@@ -3645,21 +3706,29 @@ SpacersUnavailable:
 End Sub
 
 ' Undoes ApplyPrintLookV2 / ApplyGrayscaleV2, newest change first. Safe with
-' Nothing.
+' Nothing. Each change is taken off the list before it is undone, so calling
+' this again after a part-way failure never repeats one.
 Private Sub RestoreColoursV2(ByVal changes As Collection)
-    Dim index As Long
     Dim change As Variant
 
     If changes Is Nothing Then Exit Sub
-    For index = changes.Count To 1 Step -1
-        change = changes(index)
+    Do While changes.Count > 0
+        change = changes(changes.Count)
+        changes.Remove changes.Count
         Select Case change(1)
             Case 1: change(0).Interior.Color = change(3)
             Case 2: change(0).Font.Color = change(3)
             Case 3: change(0).Borders(change(2)).Color = change(3)
-            Case 5: change(0).Rows(change(2)).Delete Shift:=xlUp
+            Case 5
+                ' Delete only a row that is still an empty 2pt spacer, never
+                ' a real invoice row that moved into its place.
+                With change(0).Rows(change(2))
+                    If Not .Hidden And .RowHeight <= 3 Then
+                        If Application.WorksheetFunction.CountA(.Cells) = 0 Then .Delete Shift:=xlUp
+                    End If
+                End With
         End Select
-    Next index
+    Loop
 End Sub
 
 ' Rec. 601 luma; Excel colours are &HBBGGRR.
