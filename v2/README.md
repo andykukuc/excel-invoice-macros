@@ -52,9 +52,14 @@ and paste any code. The same workbook runs on both platforms.
   (roughly 20 line items). Longer invoices continue onto page two, still one
   page wide. Item rows are one line tall and grow only for a wrapped
   description.
-- Paper and PDF output are always black and white (Excel's Black and white
-  page setting): fills are dropped and text and borders print black. The
-  on-screen invoice keeps its colours.
+- Paper and PDF output are always greyscale: just before printing or
+  exporting, every fill, font and border colour is converted to the grey of
+  the same brightness, so the dark heading bands, shaded sections and
+  dividers survive without colour ink. The on-screen colours are restored
+  exactly afterwards. (Excel's own Black and white page setting is not used:
+  it drops every fill and leaves the invoice without bands or dividers.)
+- Labor Total and Tire Labor Total rows that are $0 are left off the saved
+  invoice and its PDF.
 
 ## Line types
 
@@ -229,7 +234,8 @@ current shortcut:
    the Keychain credential to reconnect the SMB share.
 7. A `Road Service` line multiplies qty by unit price and reaches the Subtotal
    without appearing in Parts, Labor, or Tire Labor Total.
-8. Paper and PDF output are black and white.
+8. Paper and PDF output are greyscale with the heading bands and dividers
+   intact, and the on-screen colours return after Print.
 9. The button captions show Polish letters correctly (`ZAPISZ FAKTURĘ`).
 10. Import Invoice on the template upgrades a test invoice and replaces its
     PDF with a one-page copy, backing up both originals.

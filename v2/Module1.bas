@@ -204,6 +204,7 @@ Public Sub SaveInvoiceV2()
     Dim oldScreen As Boolean
     Dim outputSaved As Boolean
     Dim saveSucceeded As Boolean
+    Dim colourChanges As Collection
 
     Set sourceBook = ThisWorkbook
     Set sourceSheet = InvoiceSheetV2(sourceBook)
@@ -276,6 +277,8 @@ Public Sub SaveInvoiceV2()
     outputSaved = True
     bV2InternalSave = False
 
+    ' The saved XLSM keeps its colours; only the PDF is rendered in grey.
+    Set colourChanges = ApplyGrayscaleV2(PrintRangeV2(InvoiceSheetV2(outputBook)))
     InvoiceSheetV2(outputBook).ExportAsFixedFormat _
         Type:=xlTypePDF, _
         Filename:=pdfPath, _
@@ -283,6 +286,8 @@ Public Sub SaveInvoiceV2()
         IncludeDocProperties:=True, _
         IgnorePrintAreas:=False, _
         OpenAfterPublish:=False
+    RestoreColoursV2 colourChanges
+    Set colourChanges = Nothing
 
 #If Mac Then
     outputBook.Close SaveChanges:=False
@@ -681,6 +686,8 @@ Private Sub ImportLegacyInvoiceFromPathV2(ByVal presetPath As String)
     Application.StatusBar = "Creating the one-page PDF..."
     stagePdfPath = JoinPathV2(stageFolder, legacyBase & ".pdf")
     PrepareOutputCopyV2 stageBook
+    ' Never saved, so the greyscale conversion needs no restore here.
+    ApplyGrayscaleV2 PrintRangeV2(InvoiceSheetV2(stageBook))
     InvoiceSheetV2(stageBook).ExportAsFixedFormat _
         Type:=xlTypePDF, Filename:=stagePdfPath, Quality:=xlQualityStandard, _
         IncludeDocProperties:=True, IgnorePrintAreas:=False, OpenAfterPublish:=False
@@ -2230,6 +2237,7 @@ Public Sub PrintInvoiceV2()
     Dim printDialogErrorNumber As Long
     Dim printErrorNumber As Long
     Dim printErrorDescription As String
+    Dim colourChanges As Collection
 
     If bV2WorkflowBusy Then Exit Sub
     Set ws = InvoiceSheetV2(ThisWorkbook)
@@ -2248,6 +2256,8 @@ Public Sub PrintInvoiceV2()
     HideNonPrintableItemRowsV2 ws
     HideEmptyBucketsV2 ws
     ConfigurePageV2 ws
+    ' Print in grey like the PDF; the colours come back once the dialog closes.
+    Set colourChanges = ApplyGrayscaleV2(PrintRangeV2(ws))
 
     If Not BeginOneSidedPrintingV2(printerRestoreToken, printerError) Then
         Err.Raise vbObjectError + 304, , printerError
@@ -2278,6 +2288,7 @@ Public Sub PrintInvoiceV2()
 PrintDone:
     Application.EnableEvents = False
     Application.ScreenUpdating = False
+    RestoreColoursV2 colourChanges
     ShowAllBucketsV2 ws
     ProtectInvoiceV2 ws
     Application.EnableEvents = oldEvents
@@ -2295,6 +2306,7 @@ PrintError:
     If printerDefaultsChanged Then RestorePrintingDefaultsV2 printerRestoreToken
     Application.EnableEvents = False
     Application.ScreenUpdating = False
+    RestoreColoursV2 colourChanges
     ShowAllBucketsV2 ws
     ProtectInvoiceV2 ws
     Application.EnableEvents = oldEvents
@@ -3318,22 +3330,56 @@ Private Sub PrepareOutputCopyV2(ByVal wb As Workbook)
     Next rowNumber
 
     UpdateFormulasV2 ws
+    RemoveEmptyBucketTotalsV2 ws
     ' Rows were deleted above, so the cached row count is stale by definition.
     FormatInvoiceV2 ws, True
-    HideEmptyBucketsV2 ws
     ConfigurePageV2 ws
     ProtectInvoiceV2 ws
 End Sub
 
-Private Sub ConfigurePageV2(ByVal ws As Worksheet)
+' The output copy has already lost its $0 rate rows above, so
+' HideEmptyBucketsV2 can no longer find them and left "Tire Labor Total $0.00"
+' on invoices without tires. Delete the empty totals instead: Total Invoice
+' and Total Due are built from Subtotal, Sales Tax and Payment/Credit only, so
+' nothing references these cells. Editing the saved copy later re-adds them
+' through UpdateFormulasV2.
+Private Sub RemoveEmptyBucketTotalsV2(ByVal ws As Worksheet)
+    Dim labelText As Variant
+    Dim labelCell As Range
+    Dim amount As Variant
+
+    ws.Calculate
+    For Each labelText In Array("Tire Labor Total", "Labor Total")
+        Set labelCell = FindLabelV2(ws, CStr(labelText), xlWhole)
+        If Not labelCell Is Nothing Then
+            amount = labelCell.Offset(0, 1).Value2
+            If Not IsError(amount) Then
+                If IsNumeric(amount) Then
+                    If CDbl(amount) = 0 Then labelCell.EntireRow.Delete Shift:=xlUp
+                End If
+            End If
+        End If
+    Next labelText
+End Sub
+
+' Last row of the printed invoice: one below TOTAL DUE, or the used range.
+Private Function PrintLastRowV2(ByVal ws As Worksheet) As Long
     Dim dueCell As Range
-    Dim lastRow As Long
     Set dueCell = FindLabelV2(ws, "Total Due", xlPart)
     If dueCell Is Nothing Then
-        lastRow = ws.UsedRange.Row + ws.UsedRange.Rows.Count - 1
+        PrintLastRowV2 = ws.UsedRange.Row + ws.UsedRange.Rows.Count - 1
     Else
-        lastRow = dueCell.Row + 1
+        PrintLastRowV2 = dueCell.Row + 1
     End If
+End Function
+
+Private Function PrintRangeV2(ByVal ws As Worksheet) As Range
+    Set PrintRangeV2 = ws.Range("A1:E" & PrintLastRowV2(ws))
+End Function
+
+Private Sub ConfigurePageV2(ByVal ws As Worksheet)
+    Dim lastRow As Long
+    lastRow = PrintLastRowV2(ws)
 
     With ws.PageSetup
         .PrintArea = "A1:E" & lastRow
@@ -3352,12 +3398,84 @@ Private Sub ConfigurePageV2(ByVal ws As Worksheet)
         End If
         .CenterHorizontally = True
         .PrintGridlines = False
-        ' Paper and PDF are always black and white: Excel drops cell fills and
-        ' prints text and borders black, so white-on-navy headings stay legible
-        ' and nothing uses colour ink. The on-screen invoice keeps its colours.
-        .BlackAndWhite = True
+        ' Excel's Black and white mode drops every fill, which left the invoice
+        ' with no bands or dividers. Paper and PDF are instead converted to
+        ' greyscale by ApplyGrayscaleV2 just before output.
+        .BlackAndWhite = False
     End With
 End Sub
+
+' Converts every fill, font and border colour in printRange to the grey of
+' the same brightness, so paper and PDF keep the invoice's bands, headings
+' and dividers without using colour. Returns each change so RestoreColoursV2
+' can put the on-screen colours back exactly. Already-grey colours, empty
+' fills and automatic fonts are left alone.
+Private Function ApplyGrayscaleV2(ByVal printRange As Range) As Collection
+    Dim changes As New Collection
+    Dim cell As Range
+    Dim edge As Variant
+    Dim colourValue As Variant
+
+    For Each cell In printRange.Cells
+        ' A merged area shows its first cell's fill and font. Change only that
+        ' cell: writing the whole MergeArea would also fill the hidden member
+        ' cells, and the restore could not tell them apart afterwards.
+        If cell.Address = cell.MergeArea.Cells(1, 1).Address Then
+            If cell.Interior.Pattern <> xlNone Then
+                colourValue = cell.Interior.Color
+                If GrayOfV2(colourValue) <> colourValue Then
+                    changes.Add Array(cell, 1, 0, colourValue)
+                    cell.Interior.Color = GrayOfV2(colourValue)
+                End If
+            End If
+            colourValue = cell.Font.Color
+            If Not IsNull(colourValue) Then
+                If GrayOfV2(colourValue) <> colourValue Then
+                    changes.Add Array(cell, 2, 0, colourValue)
+                    cell.Font.Color = GrayOfV2(colourValue)
+                End If
+            End If
+        End If
+        For Each edge In Array(xlEdgeLeft, xlEdgeTop, xlEdgeBottom, xlEdgeRight)
+            With cell.Borders(edge)
+                If .LineStyle <> xlNone Then
+                    colourValue = .Color
+                    If GrayOfV2(colourValue) <> colourValue Then
+                        changes.Add Array(cell, 3, edge, colourValue)
+                        .Color = GrayOfV2(colourValue)
+                    End If
+                End If
+            End With
+        Next edge
+    Next cell
+    Set ApplyGrayscaleV2 = changes
+End Function
+
+' Undoes ApplyGrayscaleV2, newest change first. Safe with Nothing.
+Private Sub RestoreColoursV2(ByVal changes As Collection)
+    Dim index As Long
+    Dim change As Variant
+
+    If changes Is Nothing Then Exit Sub
+    For index = changes.Count To 1 Step -1
+        change = changes(index)
+        Select Case change(1)
+            Case 1: change(0).Interior.Color = change(3)
+            Case 2: change(0).Font.Color = change(3)
+            Case 3: change(0).Borders(change(2)).Color = change(3)
+        End Select
+    Next index
+End Sub
+
+' Rec. 601 luma; Excel colours are &HBBGGRR.
+Private Function GrayOfV2(ByVal colourValue As Long) As Long
+    Dim luma As Long
+    luma = CLng(0.299 * (colourValue And &HFF&) + _
+                0.587 * ((colourValue \ &H100&) And &HFF&) + _
+                0.114 * ((colourValue \ &H10000) And &HFF&))
+    If luma > 255 Then luma = 255
+    GrayOfV2 = RGB(luma, luma, luma)
+End Function
 
 ' True when squeezing the print area onto one sheet keeps it readable.
 ' Range.Height already excludes hidden rows, so the empty rate rows hidden
