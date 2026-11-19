@@ -3538,12 +3538,13 @@ End Sub
 ' and dividers without using colour. Returns each change so RestoreColoursV2
 ' can put the on-screen colours back exactly. Already-grey colours, empty
 ' fills and automatic fonts are left alone.
-Private Function ApplyGrayscaleV2(ByVal printRange As Range) As Collection
-    Dim changes As New Collection
+Private Function ApplyGrayscaleV2(ByVal printRange As Range, _
+                                  Optional ByVal changes As Collection) As Collection
     Dim cell As Range
     Dim edge As Variant
     Dim colourValue As Variant
 
+    If changes Is Nothing Then Set changes = New Collection
     For Each cell In printRange.Cells
         ' A merged area shows its first cell's fill and font. Change only that
         ' cell: writing the whole MergeArea would also fill the hidden member
@@ -3579,50 +3580,67 @@ Private Function ApplyGrayscaleV2(ByVal printRange As Range) As Collection
     Set ApplyGrayscaleV2 = changes
 End Function
 
-' Everything paper and PDF need beyond the page setup: greyscale colours and
-' a drawn rule at each page break. Returns the changes for RestoreColoursV2.
+' Everything paper and PDF need beyond the page setup: a spacer row at each
+' page break, then greyscale colours. Returns the changes for
+' RestoreColoursV2, which undoes them newest first (colours, then spacers).
 Private Function ApplyPrintLookV2(ByVal ws As Worksheet) As Collection
-    Dim changes As Collection
-    Set changes = ApplyGrayscaleV2(PrintRangeV2(ws))
-    AddPageBreakRulesV2 ws, changes
+    Dim changes As New Collection
+    AddPageBreakSpacersV2 ws, changes
+    ApplyGrayscaleV2 PrintRangeV2(ws), changes
     Set ApplyPrintLookV2 = changes
 End Function
 
 ' Excel leaves out the closing grid line under the framed QTY and AMOUNT
 ' cells of the last row before a page break, whatever the border settings
-' (thin, medium and thick rules and thinner side frames all render the same);
-' ITEM, DESCRIPTION and UNIT PRICE keep theirs. Thin line shapes drawn under
-' just those two cells close the table on paper and in the PDF. The shapes
-' are temporary: RestoreColoursV2 deletes them again.
-Private Sub AddPageBreakRulesV2(ByVal ws As Worksheet, ByVal changes As Collection)
+' (thin, medium and thick rules and thinner side frames all render the same),
+' and a drawn line shape drifts onto the next page. A 2pt spacer row inserted
+' at each break makes the real last item row an ordinary row, so its whole
+' bottom border prints at normal weight; the spacer shows only the side frame.
+' Temporary: RestoreColoursV2 deletes the spacers again.
+Private Sub AddPageBreakSpacersV2(ByVal ws As Worksheet, ByVal changes As Collection)
+    Const SPACER_HEIGHT As Double = 2
     Dim pageBreak As HPageBreak
-    Dim rule As Shape
-    Dim column As Variant
-    Dim breakRow As Long
+    Dim breakRows() As Long
+    Dim breakCount As Long
+    Dim index As Long
     Dim lastRow As Long
-    Dim ruleTop As Double
+    Dim spacerRow As Long
 
-    On Error GoTo RulesUnavailable
+    On Error GoTo SpacersUnavailable
     lastRow = PrintLastRowV2(ws)
+    ReDim breakRows(1 To ws.HPageBreaks.Count + 1)
+    ' HPageBreaks lists breaks from the top of the sheet down.
     For Each pageBreak In ws.HPageBreaks
-        breakRow = pageBreak.Location.Row
-        If breakRow > LINEITEM_START And breakRow <= lastRow Then
-            ruleTop = ws.Rows(breakRow).Top - 0.4
-            For Each column In Array("A", "E")
-                With ws.Range(column & "1")
-                    Set rule = ws.Shapes.AddLine(.Left, ruleTop, .Left + .Width, ruleTop)
-                End With
-                rule.Line.ForeColor.RGB = RGB(180, 180, 180)
-                rule.Line.Weight = 0.75
-                rule.Placement = xlFreeFloating
-                changes.Add Array(rule, 4, 0, 0)
-            Next column
+        If pageBreak.Location.Row > LINEITEM_START And pageBreak.Location.Row <= lastRow Then
+            breakCount = breakCount + 1
+            breakRows(breakCount) = pageBreak.Location.Row
         End If
     Next pageBreak
+    If breakCount = 0 Then Exit Sub
+
+    ws.ResetAllPageBreaks
+    ' Bottom-up, so each insert leaves the rows of the breaks above in place.
+    For index = breakCount To 1 Step -1
+        spacerRow = breakRows(index)
+        ws.Rows(spacerRow).Insert Shift:=xlDown, CopyOrigin:=xlFormatFromLeftOrAbove
+        ws.Rows(spacerRow).RowHeight = SPACER_HEIGHT
+        With ws.Range("A" & spacerRow & ":E" & spacerRow)
+            .Interior.Pattern = xlNone
+            .Borders(xlEdgeBottom).LineStyle = xlNone
+            .Borders(xlInsideVertical).LineStyle = xlNone
+        End With
+    Next index
+
+    ' Break k now sits k rows lower, below its own spacer, so each spacer
+    ' ends the earlier page.
+    For index = 1 To breakCount
+        ws.HPageBreaks.Add Before:=ws.Rows(breakRows(index) + index)
+        changes.Add Array(ws, 5, breakRows(index) + index - 1, 0)
+    Next index
     Exit Sub
 
-RulesUnavailable:
-    ' Cosmetic only: output continues without the rule.
+SpacersUnavailable:
+    ' Cosmetic only: output continues with Excel's own break.
     Err.Clear
 End Sub
 
@@ -3639,7 +3657,7 @@ Private Sub RestoreColoursV2(ByVal changes As Collection)
             Case 1: change(0).Interior.Color = change(3)
             Case 2: change(0).Font.Color = change(3)
             Case 3: change(0).Borders(change(2)).Color = change(3)
-            Case 4: change(0).Delete
+            Case 5: change(0).Rows(change(2)).Delete Shift:=xlUp
         End Select
     Next index
 End Sub
