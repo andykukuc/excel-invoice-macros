@@ -76,6 +76,33 @@ Private Type LegacyInvoiceDataV2
     ItemCount As Long
 End Type
 
+' Unattended imports exist only for the Windows test harness, which calls
+' RunUnattendedImportV2 through Application.Run: importer dialogs are recorded
+' instead of shown, the replace confirmation is accepted, and Windows backups
+' go to a test folder instead of the Desktop.
+Private bV2ImportUnattended As Boolean
+Private sV2ImportLastNotice As String
+Private sV2BackupRootOverride As String
+
+#If Not Mac Then
+' Windows Excel is not sandboxed, so the work the Mac AppleScript helper does
+' for the importer happens in this module. CNG (bcrypt.dll, Windows 10+)
+' provides SHA-256; MoveFileExW gives a same-folder replace that the file
+' server performs as a rename.
+Private Declare PtrSafe Function BCryptOpenAlgorithmProvider Lib "bcrypt.dll" ( _
+    ByRef phAlgorithm As LongPtr, ByVal pszAlgId As LongPtr, _
+    ByVal pszImplementation As LongPtr, ByVal dwFlags As Long) As Long
+Private Declare PtrSafe Function BCryptHash Lib "bcrypt.dll" ( _
+    ByVal hAlgorithm As LongPtr, ByVal pbSecret As LongPtr, ByVal cbSecret As Long, _
+    ByVal pbInput As LongPtr, ByVal cbInput As Long, _
+    ByVal pbOutput As LongPtr, ByVal cbOutput As Long) As Long
+Private Declare PtrSafe Function BCryptCloseAlgorithmProvider Lib "bcrypt.dll" ( _
+    ByVal hAlgorithm As LongPtr, ByVal dwFlags As Long) As Long
+Private Declare PtrSafe Function MoveFileExW Lib "kernel32" ( _
+    ByVal lpExistingFileName As LongPtr, ByVal lpNewFileName As LongPtr, _
+    ByVal dwFlags As Long) As Long
+#End If
+
 ' ============================================================
 '  PUBLIC WORKFLOW
 ' ============================================================
@@ -225,7 +252,7 @@ Public Sub SaveInvoiceV2()
     ' Excel for Mac is sandboxed. Build both files in Excel's private temporary
     ' directory, then let the installed AppleScriptTask helper copy them to SMB.
     ' This avoids Grant File Access prompts for every new invoice filename.
-    stageFolder = GetMacStagingFolderV2()
+    stageFolder = GetStagingFolderV2()
     If stageFolder = "" Then
         Err.Raise vbObjectError + 301, , "Excel could not create its temporary invoice folder."
     End If
@@ -303,6 +330,7 @@ SaveError:
         MsgBox "The invoice was saved, but the final handoff did not complete." & _
                vbCrLf & vbCrLf & saveMessage, vbExclamation, "Invoice Saved With Warning"
     ElseIf outputSaved And xlsmPath <> "" And FileExistsV2(xlsmPath) Then
+#If Mac Then
         ' The invoice was fully built but never reached the customer folders.
         ' The staging area is $TMPDIR: invisible in Finder and cleared on
         ' restart, so a path there is not a usable recovery for this user.
@@ -323,17 +351,26 @@ SaveError:
                    vbCrLf & vbCrLf & xlsmPath & vbCrLf & vbCrLf & saveMessage, _
                    vbExclamation, "Partial Save"
         End If
+#Else
+        ' Windows writes straight into the customer folders, so the workbook
+        ' is already where it belongs; only the PDF step failed.
+        MsgBox "The invoice workbook was saved, but its PDF could not be created." & _
+               vbCrLf & vbCrLf & "Saved workbook:" & vbCrLf & xlsmPath & vbCrLf & vbCrLf & _
+               "Open that invoice and use PRINT, or save the invoice again." & _
+               vbCrLf & vbCrLf & saveMessage, vbExclamation, "Partial Save"
+#End If
     Else
         MsgBox "The invoice could not be saved. Your open invoice was not changed." & _
                vbCrLf & vbCrLf & saveMessage, vbCritical, "Save Failed"
     End If
 End Sub
 
-' Ask the AppleScriptTask helper to copy a fully saved staged invoice to
-' ~/Desktop/Invoice Recovery. Returns the recovered path, or "" when the
-' helper is unavailable (for example an older installed version without the
-' recoverInvoiceFiles handler). Never raises: this only runs inside the save
-' error path, where a second failure must not mask the original message.
+' Copy a fully saved staged invoice (and its PDF, when present) to
+' <Desktop>/Invoice Recovery. On the Mac the AppleScriptTask helper does the
+' copy from outside the sandbox. Returns the recovered path, or "" when that is
+' not possible (for example an older helper without recoverInvoiceFiles).
+' Never raises: this only runs inside error paths, where a second failure must
+' not mask the original message.
 Private Function RecoverStagedInvoiceV2(ByVal stagedXlsm As String, _
                                         ByVal stagedPdf As String, _
                                         ByVal baseName As String) As String
@@ -353,6 +390,8 @@ Private Function RecoverStagedInvoiceV2(ByVal stagedXlsm As String, _
 
 RecoveryUnavailable:
     Err.Clear
+    #Else
+    RecoverStagedInvoiceV2 = WinRecoverInvoiceFilesV2(stagedXlsm, stagedPdf, baseName)
     #End If
 End Function
 
@@ -376,12 +415,61 @@ Public Sub NewInvoiceV2()
     Workbooks.Open templatePath
 End Sub
 
-' Administrator-only migration command. It intentionally has no worksheet
-' button: open the Macros dialog (Control+Option+F8), select
-' ImportLegacyInvoiceV2, and choose one old invoice. The legacy workbook is
-' opened read-only with its macros disabled; only approved input values are
-' copied into a clean SaveCopyAs of this trusted V2 template.
+' Upgrades one old invoice. Run from the template's Import Invoice button (or
+' the Macros dialog). The legacy workbook is opened read-only with its macros
+' disabled; only approved input values are copied into a clean SaveCopyAs of
+' this trusted V2 template. Works on the Mac (through the AppleScriptTask
+' helper) and on Windows (natively, see WINDOWS FILE HANDOFF).
 Public Sub ImportLegacyInvoiceV2()
+    ImportLegacyInvoiceFromPathV2 ""
+End Sub
+
+' Test entry point for the Windows harness only (Application.Run). Runs the
+' whole importer on legacyPath with no dialogs and returns the final notice as
+' "Title: message". Windows backups go under backupRoot instead of the Desktop.
+Private Function RunUnattendedImportV2(ByVal legacyPath As String, _
+                                       ByVal backupRoot As String) As String
+    bV2ImportUnattended = True
+    sV2BackupRootOverride = backupRoot
+    sV2ImportLastNotice = ""
+    On Error GoTo UnattendedFailed
+    ImportLegacyInvoiceFromPathV2 legacyPath
+    RunUnattendedImportV2 = sV2ImportLastNotice
+
+UnattendedFinish:
+    bV2ImportUnattended = False
+    sV2BackupRootOverride = ""
+    Exit Function
+
+UnattendedFailed:
+    RunUnattendedImportV2 = "Unhandled error " & CStr(Err.Number) & ": " & Err.Description
+    Resume UnattendedFinish
+End Function
+
+' Every importer dialog goes through here so an unattended run can record it
+' instead of blocking on it. Unattended runs accept the replace confirmation.
+Private Function ImportNoticeV2(ByVal prompt As String, ByVal buttons As VbMsgBoxStyle, _
+                                ByVal title As String) As VbMsgBoxResult
+    sV2ImportLastNotice = title & ": " & prompt
+    If bV2ImportUnattended Then
+        ImportNoticeV2 = vbYes
+    Else
+        ImportNoticeV2 = MsgBox(prompt, buttons, title)
+    End If
+End Function
+
+Private Function PickLegacyInvoiceV2() As Variant
+#If Mac Then
+    ' Mac Excel ignores the Windows FileFilter syntax.
+    PickLegacyInvoiceV2 = Application.GetOpenFilename(Title:="Choose old XLSM invoice to upgrade")
+#Else
+    PickLegacyInvoiceV2 = Application.GetOpenFilename( _
+        FileFilter:="Excel Macro-Enabled Workbook (*.xlsm),*.xlsm", _
+        Title:="Choose old XLSM invoice to upgrade")
+#End If
+End Function
+
+Private Sub ImportLegacyInvoiceFromPathV2(ByVal presetPath As String)
     Dim selectedFile As Variant
     Dim legacyPath As String
     Dim legacyName As String
@@ -419,18 +507,22 @@ Public Sub ImportLegacyInvoiceV2()
     Dim invoiceData As LegacyInvoiceDataV2
 
     If bV2WorkflowBusy Then
-        MsgBox "Another Invoice Maker operation is still running.", _
+        ImportNoticeV2 "Another Invoice Maker operation is still running.", _
                vbExclamation, "Import Not Started"
         Exit Sub
     End If
 
     If Not IsTemplateWorkbookV2(ThisWorkbook) Then
-        MsgBox "Run this private maintenance command from the production V2 template.", _
+        ImportNoticeV2 "Run this private maintenance command from the production V2 template.", _
                vbExclamation, "Import Not Started"
         Exit Sub
     End If
 
-    selectedFile = Application.GetOpenFilename(Title:="Choose old XLSM invoice to upgrade")
+    If presetPath <> "" Then
+        selectedFile = presetPath
+    Else
+        selectedFile = PickLegacyInvoiceV2()
+    End If
     If VarType(selectedFile) = vbBoolean Then
         If selectedFile = False Then Exit Sub
     End If
@@ -438,33 +530,33 @@ Public Sub ImportLegacyInvoiceV2()
     legacyPath = Trim$(CStr(selectedFile))
     legacyName = FileNameFromPathV2(legacyPath)
     If LCase$(Right$(legacyName, 5)) <> ".xlsm" Then
-        MsgBox "Choose an old macro-enabled Excel invoice (.xlsm).", _
+        ImportNoticeV2 "Choose an old macro-enabled Excel invoice (.xlsm).", _
                vbExclamation, "Import Not Started"
         Exit Sub
     End If
     If Left$(legacyName, 2) = "~$" Then
-        MsgBox "That is Excel's temporary lock file, not an invoice.", _
+        ImportNoticeV2 "That is Excel's temporary lock file, not an invoice.", _
                vbExclamation, "Import Not Started"
         Exit Sub
     End If
     If InStr(1, legacyName, TEMPLATE_TOKEN, vbTextCompare) > 0 Then
-        MsgBox "A template cannot be imported as an old invoice.", _
+        ImportNoticeV2 "A template cannot be imported as an old invoice.", _
                vbExclamation, "Import Not Started"
         Exit Sub
     End If
     If SamePathV2(legacyPath, ThisWorkbook.FullName) Then
-        MsgBox "The production template cannot replace itself.", _
+        ImportNoticeV2 "The production template cannot replace itself.", _
                vbExclamation, "Import Not Started"
         Exit Sub
     End If
     If WorkbookPathIsOpenV2(legacyPath) Then
-        MsgBox "Close the old invoice in Excel, then run the import again.", _
+        ImportNoticeV2 "Close the old invoice in Excel, then run the import again.", _
                vbExclamation, "Old Invoice Is Open"
         Exit Sub
     End If
 
     If Not FingerprintFileV2(legacyPath, expectedFingerprint, helperError) Then
-        MsgBox "The selected invoice could not be verified before import." & _
+        ImportNoticeV2 "The selected invoice could not be verified before import." & _
                vbCrLf & vbCrLf & helperError, vbCritical, "Import Not Started"
         Exit Sub
     End If
@@ -548,7 +640,7 @@ Public Sub ImportLegacyInvoiceV2()
     comparisonText = LegacyTotalComparisonV2(invoiceData, stageSheet)
 
     Application.ScreenUpdating = True
-    If MsgBox( _
+    If ImportNoticeV2( _
         "Ready to upgrade this invoice:" & vbCrLf & vbCrLf & _
         legacyPath & vbCrLf & vbCrLf & _
         "Invoice #: " & invoiceData.InvoiceNumber & vbCrLf & _
@@ -656,14 +748,14 @@ ImportFinish:
         On Error GoTo 0
 
         If pdfPlaced Then
-            MsgBox "The old invoice was upgraded successfully." & vbCrLf & vbCrLf & _
+            ImportNoticeV2 "The old invoice was upgraded successfully." & vbCrLf & vbCrLf & _
                    "Updated file:" & vbCrLf & finalPath & vbCrLf & vbCrLf & _
                    "New PDF:" & vbCrLf & finalPdfPath & vbCrLf & vbCrLf & _
                    "Recovery backups:" & vbCrLf & backupPath & _
                    IIf(pdfBackupPath <> "", vbCrLf & pdfBackupPath, ""), _
                    vbInformation, "Legacy Invoice Upgraded"
         Else
-            MsgBox "The invoice was upgraded, but its PDF was not updated." & _
+            ImportNoticeV2 "The invoice was upgraded, but its PDF was not updated." & _
                    vbCrLf & vbCrLf & "Updated file:" & vbCrLf & finalPath & _
                    vbCrLf & vbCrLf & "Recovery backup:" & vbCrLf & backupPath & _
                    vbCrLf & vbCrLf & "Run the import again on the same file to " & _
@@ -688,7 +780,7 @@ ImportFinish:
 
         If replacementOutcome = "RECOVERY_REQUIRED" Then
             If recoveredPath <> "" Then
-                MsgBox "The final replacement state could not be verified." & _
+                ImportNoticeV2 "The final replacement state could not be verified." & _
                        vbCrLf & "Do not edit the selected invoice until it is checked." & _
                        vbCrLf & vbCrLf & "Recovery V2 copy:" & vbCrLf & _
                        recoveredPath & vbCrLf & vbCrLf & "Verified original backup:" & _
@@ -696,7 +788,7 @@ ImportFinish:
                        "Error " & CStr(importErrorNumber) & ": " & _
                        importErrorDescription, vbCritical, "Import Needs Recovery"
             Else
-                MsgBox "The final replacement state could not be verified." & _
+                ImportNoticeV2 "The final replacement state could not be verified." & _
                        vbCrLf & "Do not edit the selected invoice until it is checked." & _
                        vbCrLf & vbCrLf & "Verified original backup:" & vbCrLf & _
                        backupPath & vbCrLf & vbCrLf & _
@@ -704,14 +796,14 @@ ImportFinish:
                        importErrorDescription, vbCritical, "Import Needs Recovery"
             End If
         ElseIf recoveredPath <> "" Then
-            MsgBox "The original invoice was not replaced (or was restored safely)." & _
+            ImportNoticeV2 "The original invoice was not replaced (or was restored safely)." & _
                    vbCrLf & vbCrLf & _
                    "A completed V2 recovery copy was placed here:" & vbCrLf & _
                    recoveredPath & vbCrLf & vbCrLf & _
                    "Error " & CStr(importErrorNumber) & ": " & _
                    importErrorDescription, vbCritical, "Import Stopped Safely"
         Else
-            MsgBox "The original invoice was not replaced (or was restored safely)." & _
+            ImportNoticeV2 "The original invoice was not replaced (or was restored safely)." & _
                    vbCrLf & vbCrLf & _
                    "Error " & CStr(importErrorNumber) & ": " & _
                    importErrorDescription, vbCritical, "Import Stopped Safely"
@@ -1629,7 +1721,7 @@ Private Function GetLegacyStageFolderV2() As String
     Dim candidateFolder As String
     Dim attemptNumber As Long
 
-    stagingRoot = GetMacStagingFolderV2()
+    stagingRoot = GetStagingFolderV2()
     If stagingRoot = "" Then Exit Function
     Randomize Timer
     On Error GoTo StageFolderError
@@ -1671,7 +1763,13 @@ HelperError:
                    vbCrLf & "Run the Mac installer again, then retry." & _
                    vbCrLf & vbCrLf & Err.Description
 #Else
-    errorMessage = "Legacy replacement is currently supported on macOS only."
+    On Error GoTo FingerprintFailed
+    fingerprint = WinSha256FileV2(filePath)
+    FingerprintFileV2 = (fingerprint <> "")
+    Exit Function
+FingerprintFailed:
+    errorMessage = "The selected invoice could not be read. Close it in every " & _
+                   "other program, then retry." & vbCrLf & vbCrLf & Err.Description
 #End If
 End Function
 
@@ -1717,7 +1815,10 @@ HelperError:
     errorMessage = "The Mac invoice helper is missing or could not finish the " & _
                    "verified replacement." & vbCrLf & vbCrLf & Err.Description
 #Else
-    errorMessage = "Legacy replacement is currently supported on macOS only."
+    ReplaceLegacyInvoiceV2 = WinReplaceLegacyInvoiceV2(stagedPath, originalPath, _
+                                                       expectedFingerprint, finalPath, _
+                                                       backupPath, replacementOutcome, _
+                                                       errorMessage)
 #End If
 End Function
 
@@ -1754,9 +1855,370 @@ HelperError:
                    "placeImportedPdf). Run the Mac installer again." & _
                    vbCrLf & vbCrLf & Err.Description
 #Else
-    errorMessage = "PDF replacement is currently supported on macOS only."
+    PlaceImportedPdfV2 = WinPlaceImportedPdfV2(stagedPdfPath, invoicePath, finalPdfPath, _
+                                               pdfBackupPath, errorMessage)
 #End If
 End Function
+
+#If Not Mac Then
+' ============================================================
+'  WINDOWS FILE HANDOFF
+'  The same steps the Mac AppleScript helper performs, done in-process:
+'  SHA-256 fingerprints, hash-verified Desktop backups, and a verified hidden
+'  candidate renamed over the target in its own folder. FileSystemObject and
+'  ADODB.Stream are Unicode-safe; VBA's Open/FileCopy/Kill/Dir go through the
+'  ANSI code page and fail on customer folders with Polish letters.
+' ============================================================
+
+Private Function WinSha256FileV2(ByVal filePath As String) As String
+    Const SHA256_BYTES As Long = 32
+    Dim stream As Object
+    Dim fileBytes() As Byte
+    Dim hashBytes(0 To SHA256_BYTES - 1) As Byte
+    Dim algorithm As LongPtr
+    Dim inputPointer As LongPtr
+    Dim inputLength As Long
+    Dim status As Long
+    Dim index As Long
+    Dim hexText As String
+
+    Set stream = CreateObject("ADODB.Stream")
+    stream.Type = 1 ' adTypeBinary
+    stream.Open
+    stream.LoadFromFile filePath
+    inputLength = CLng(stream.Size)
+    If inputLength > 0 Then
+        fileBytes = stream.Read
+        inputPointer = VarPtr(fileBytes(0))
+    End If
+    stream.Close
+
+    status = BCryptOpenAlgorithmProvider(algorithm, StrPtr("SHA256"), 0, 0)
+    If status <> 0 Then
+        Err.Raise vbObjectError + 370, , "Windows could not start SHA-256 (status &H" & Hex$(status) & ")."
+    End If
+    status = BCryptHash(algorithm, 0, 0, inputPointer, inputLength, _
+                        VarPtr(hashBytes(0)), SHA256_BYTES)
+    BCryptCloseAlgorithmProvider algorithm, 0
+    If status <> 0 Then
+        Err.Raise vbObjectError + 371, , "Windows could not fingerprint " & filePath & _
+                  " (status &H" & Hex$(status) & ")."
+    End If
+
+    For index = 0 To SHA256_BYTES - 1
+        hexText = hexText & Right$("0" & Hex$(hashBytes(index)), 2)
+    Next index
+    WinSha256FileV2 = LCase$(hexText)
+End Function
+
+' Same-folder rename that replaces an existing target. On a file share the
+' server performs it as one rename, so the target is never half-written.
+Private Sub WinReplaceFileV2(ByVal sourcePath As String, ByVal targetPath As String)
+    Const MOVEFILE_REPLACE_EXISTING As Long = &H1
+    Const MOVEFILE_WRITE_THROUGH As Long = &H8
+    Dim lastError As Long
+
+    If MoveFileExW(StrPtr(sourcePath), StrPtr(targetPath), _
+                   MOVEFILE_REPLACE_EXISTING Or MOVEFILE_WRITE_THROUGH) = 0 Then
+        lastError = Err.LastDllError
+        Err.Raise vbObjectError + 372, , "Windows could not move the new file into place " & _
+                  "(error " & CStr(lastError) & "; is it open in another program?): " & targetPath
+    End If
+End Sub
+
+Private Function WinBackupRootV2() As String
+    If sV2BackupRootOverride <> "" Then
+        WinBackupRootV2 = sV2BackupRootOverride
+    Else
+        ' SpecialFolders follows OneDrive Desktop redirection; USERPROFILE does not.
+        WinBackupRootV2 = CreateObject("WScript.Shell").SpecialFolders("Desktop")
+    End If
+End Function
+
+Private Function WinEnsureFolderV2(ByVal fso As Object, ByVal parentPath As String, _
+                                   ByVal childName As String) As String
+    Dim folderPath As String
+    folderPath = fso.BuildPath(parentPath, childName)
+    If Not fso.FolderExists(folderPath) Then fso.CreateFolder folderPath
+    WinEnsureFolderV2 = folderPath
+End Function
+
+' Mirrors the Mac helper's naming: <stem><extension>, then <stem>-2, -3, ...
+Private Function WinUniquePathV2(ByVal fso As Object, ByVal folderPath As String, _
+                                 ByVal stem As String, ByVal extension As String) As String
+    Dim candidate As String
+    Dim suffixNumber As Long
+
+    candidate = fso.BuildPath(folderPath, stem & extension)
+    suffixNumber = 1
+    Do While fso.FileExists(candidate)
+        suffixNumber = suffixNumber + 1
+        candidate = fso.BuildPath(folderPath, stem & "-" & CStr(suffixNumber) & extension)
+    Loop
+    WinUniquePathV2 = candidate
+End Function
+
+Private Function WinUniqueTokenV2() As String
+    Randomize
+    WinUniqueTokenV2 = Format$(Now, "yyyymmddhhnnss") & "-" & _
+                       Format$(Int(Rnd() * 1000000#), "000000")
+End Function
+
+Private Sub WinRequireFileV2(ByVal fso As Object, ByVal filePath As String, _
+                             ByVal descriptionText As String)
+    If Not fso.FileExists(filePath) Then
+        Err.Raise vbObjectError + 373, , "Missing " & descriptionText & ": " & filePath
+    End If
+End Sub
+
+Private Function WinFindChildFolderV2(ByVal fso As Object, ByVal parentPath As String, _
+                                      ByVal requestedName As String) As String
+    Dim childFolder As Object
+    If Not fso.FolderExists(parentPath) Then Exit Function
+    For Each childFolder In fso.GetFolder(parentPath).SubFolders
+        If StrComp(childFolder.Name, requestedName, vbTextCompare) = 0 Then
+            WinFindChildFolderV2 = childFolder.Path
+            Exit Function
+        End If
+    Next childFolder
+End Function
+
+' Windows port of the helper's replaceLegacyInvoice. replacementOutcome is
+' UNTOUCHED, RESTORED or RECOVERY_REQUIRED on failure, matching the Mac path.
+Private Function WinReplaceLegacyInvoiceV2(ByVal stagedPath As String, _
+                                           ByVal originalPath As String, _
+                                           ByVal expectedFingerprint As String, _
+                                           ByRef finalPath As String, _
+                                           ByRef backupPath As String, _
+                                           ByRef replacementOutcome As String, _
+                                           ByRef errorMessage As String) As Boolean
+    Dim fso As Object
+    Dim originalFingerprint As String
+    Dim stagedFingerprint As String
+    Dim currentFingerprint As String
+    Dim targetFolder As String
+    Dim candidatePath As String
+    Dim restorePath As String
+    Dim replacementAttempted As Boolean
+
+    On Error GoTo ReplaceFailed
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    WinRequireFileV2 fso, stagedPath, "completed V2 invoice"
+    WinRequireFileV2 fso, originalPath, "selected legacy invoice"
+    If SamePathV2(stagedPath, originalPath) Then
+        Err.Raise vbObjectError + 374, , "The staged and original invoice paths are the same."
+    End If
+
+    originalFingerprint = WinSha256FileV2(originalPath)
+    If originalFingerprint <> expectedFingerprint Then
+        Err.Raise vbObjectError + 375, , "The selected invoice changed after it was read. " & _
+                  "Close any other copy of it and retry the import."
+    End If
+    stagedFingerprint = WinSha256FileV2(stagedPath)
+
+    backupPath = WinUniquePathV2(fso, _
+        WinEnsureFolderV2(fso, WinBackupRootV2(), "Invoice Import Backups"), _
+        fso.GetBaseName(originalPath) & "_before_V2_" & Format$(Now, "yyyymmdd-hhnnss"), ".xlsm")
+    fso.CopyFile originalPath, backupPath, False
+    If WinSha256FileV2(backupPath) <> originalFingerprint Then
+        Err.Raise vbObjectError + 376, , "The recovery backup did not verify. The original was not replaced."
+    End If
+
+    targetFolder = fso.GetParentFolderName(originalPath)
+    candidatePath = fso.BuildPath(targetFolder, "." & fso.GetFileName(originalPath) & _
+                                  ".v2-" & WinUniqueTokenV2() & ".xlsm")
+    fso.CopyFile stagedPath, candidatePath, False
+    If WinSha256FileV2(candidatePath) <> stagedFingerprint Then
+        Err.Raise vbObjectError + 377, , "The replacement candidate did not verify. The original was not replaced."
+    End If
+    ' Detect another user or process changing the invoice while this was prepared.
+    If WinSha256FileV2(originalPath) <> originalFingerprint Then
+        Err.Raise vbObjectError + 378, , "The selected invoice changed during the import. Its path was not replaced."
+    End If
+
+    ' MoveFileExW either renames or leaves both files untouched, so a refusal
+    ' (target open elsewhere) still reports UNTOUCHED.
+    WinReplaceFileV2 candidatePath, originalPath
+    candidatePath = ""
+    replacementAttempted = True
+
+    ' A read error while verifying must not skip the restore below: anything
+    ' short of a confirmed match restores the original, as the Mac helper does.
+    currentFingerprint = ""
+    On Error Resume Next
+    currentFingerprint = WinSha256FileV2(originalPath)
+    On Error GoTo ReplaceFailed
+    If currentFingerprint <> stagedFingerprint Then
+        ' A verified backup exists. Restore through another same-folder
+        ' candidate so the path never holds an untrusted partial file.
+        restorePath = fso.BuildPath(targetFolder, "." & fso.GetFileName(originalPath) & _
+                                    ".restore-" & WinUniqueTokenV2() & ".xlsm")
+        fso.CopyFile backupPath, restorePath, False
+        If WinSha256FileV2(restorePath) <> originalFingerprint Then
+            Err.Raise vbObjectError + 379, , "The final replacement failed and the recovery copy could not be staged."
+        End If
+        WinReplaceFileV2 restorePath, originalPath
+        restorePath = ""
+        If WinSha256FileV2(originalPath) <> originalFingerprint Then
+            Err.Raise vbObjectError + 380, , "The final replacement failed and automatic restoration could not be verified."
+        End If
+        Err.Raise vbObjectError + 381, , "The final replacement did not verify, so the original invoice was restored."
+    End If
+
+    On Error Resume Next
+    fso.DeleteFile stagedPath, True
+    On Error GoTo 0
+    finalPath = originalPath
+    WinReplaceLegacyInvoiceV2 = True
+    Exit Function
+
+ReplaceFailed:
+    errorMessage = Err.Description
+    On Error Resume Next
+    If candidatePath <> "" Then fso.DeleteFile candidatePath, True
+    If restorePath <> "" Then fso.DeleteFile restorePath, True
+    ' Hash into a variable first: under Resume Next a failing call inside an
+    ' If condition would fall through into the Then branch.
+    currentFingerprint = ""
+    currentFingerprint = WinSha256FileV2(originalPath)
+    If originalFingerprint = "" Then
+        replacementOutcome = "UNTOUCHED"
+    ElseIf currentFingerprint <> originalFingerprint Then
+        replacementOutcome = "RECOVERY_REQUIRED"
+    ElseIf replacementAttempted Then
+        replacementOutcome = "RESTORED"
+    Else
+        replacementOutcome = "UNTOUCHED"
+    End If
+    Err.Clear
+    On Error GoTo 0
+End Function
+
+' Windows port of the helper's placeImportedPdf: <customer>/PDF/<base>.pdf when
+' the XLSM sits in an Excel folder with a PDF sibling, otherwise beside it.
+Private Function WinPlaceImportedPdfV2(ByVal stagedPdfPath As String, _
+                                       ByVal invoicePath As String, _
+                                       ByRef finalPdfPath As String, _
+                                       ByRef pdfBackupPath As String, _
+                                       ByRef errorMessage As String) As Boolean
+    Dim fso As Object
+    Dim invoiceFolder As String
+    Dim pdfFolder As String
+    Dim siblingPdf As String
+    Dim baseName As String
+    Dim stagedFingerprint As String
+    Dim originalFingerprint As String
+    Dim currentFingerprint As String
+    Dim candidatePath As String
+    Dim restorePath As String
+
+    On Error GoTo PlaceFailed
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    WinRequireFileV2 fso, stagedPdfPath, "temporary PDF copy"
+    WinRequireFileV2 fso, invoicePath, "upgraded invoice"
+
+    invoiceFolder = fso.GetParentFolderName(invoicePath)
+    baseName = fso.GetBaseName(invoicePath)
+    pdfFolder = invoiceFolder
+    If StrComp(fso.GetFileName(invoiceFolder), "excel", vbTextCompare) = 0 Then
+        siblingPdf = WinFindChildFolderV2(fso, fso.GetParentFolderName(invoiceFolder), "pdf")
+        If siblingPdf <> "" Then pdfFolder = siblingPdf
+    End If
+
+    finalPdfPath = fso.BuildPath(pdfFolder, baseName & ".pdf")
+    stagedFingerprint = WinSha256FileV2(stagedPdfPath)
+
+    If fso.FileExists(finalPdfPath) Then
+        originalFingerprint = WinSha256FileV2(finalPdfPath)
+        pdfBackupPath = WinUniquePathV2(fso, _
+            WinEnsureFolderV2(fso, WinBackupRootV2(), "Invoice Import Backups"), _
+            baseName & "_before_V2_" & Format$(Now, "yyyymmdd-hhnnss"), ".pdf")
+        fso.CopyFile finalPdfPath, pdfBackupPath, False
+        If WinSha256FileV2(pdfBackupPath) <> originalFingerprint Then
+            Err.Raise vbObjectError + 382, , "The PDF backup did not verify. The old PDF was not replaced."
+        End If
+    End If
+
+    candidatePath = fso.BuildPath(pdfFolder, "." & baseName & ".v2-" & WinUniqueTokenV2() & ".pdf")
+    fso.CopyFile stagedPdfPath, candidatePath, False
+    If WinSha256FileV2(candidatePath) <> stagedFingerprint Then
+        Err.Raise vbObjectError + 383, , "The new PDF did not copy correctly. The old PDF was not replaced."
+    End If
+    WinReplaceFileV2 candidatePath, finalPdfPath
+    candidatePath = ""
+
+    ' Never leave an unverified PDF behind: put the verified old one back, or
+    ' remove the new one when there was no old PDF.
+    currentFingerprint = ""
+    On Error Resume Next
+    currentFingerprint = WinSha256FileV2(finalPdfPath)
+    On Error GoTo PlaceFailed
+    If currentFingerprint <> stagedFingerprint Then
+        If pdfBackupPath <> "" Then
+            restorePath = fso.BuildPath(pdfFolder, "." & baseName & ".restore-" & _
+                                        WinUniqueTokenV2() & ".pdf")
+            fso.CopyFile pdfBackupPath, restorePath, False
+            If WinSha256FileV2(restorePath) <> originalFingerprint Then
+                Err.Raise vbObjectError + 385, , "The new PDF did not verify and the old PDF " & _
+                          "could not be put back."
+            End If
+            WinReplaceFileV2 restorePath, finalPdfPath
+            restorePath = ""
+            Err.Raise vbObjectError + 384, , "The new PDF did not verify, so the old PDF was put back."
+        End If
+        fso.DeleteFile finalPdfPath, True
+        Err.Raise vbObjectError + 384, , "The new PDF did not verify and was removed."
+    End If
+
+    On Error Resume Next
+    fso.DeleteFile stagedPdfPath, True
+    On Error GoTo 0
+    WinPlaceImportedPdfV2 = True
+    Exit Function
+
+PlaceFailed:
+    errorMessage = Err.Description
+    On Error Resume Next
+    If candidatePath <> "" Then fso.DeleteFile candidatePath, True
+    If restorePath <> "" Then fso.DeleteFile restorePath, True
+    If pdfBackupPath <> "" Then errorMessage = errorMessage & " Old PDF backup: " & pdfBackupPath
+    Err.Clear
+    On Error GoTo 0
+End Function
+
+' Windows port of the helper's recoverInvoiceFiles. Never raises.
+Private Function WinRecoverInvoiceFilesV2(ByVal stagedXlsm As String, _
+                                          ByVal stagedPdf As String, _
+                                          ByVal baseName As String) As String
+    Dim fso As Object
+    Dim recoveryFolder As String
+    Dim recoveredXlsm As String
+
+    On Error GoTo RecoveryFailed
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FileExists(stagedXlsm) Then Exit Function
+    recoveryFolder = WinEnsureFolderV2(fso, WinBackupRootV2(), "Invoice Recovery")
+    recoveredXlsm = WinUniquePathV2(fso, recoveryFolder, baseName, ".xlsm")
+    fso.CopyFile stagedXlsm, recoveredXlsm, False
+    ' Callers delete the staged file once a path comes back, so only return
+    ' a copy that is proven identical.
+    If WinSha256FileV2(recoveredXlsm) <> WinSha256FileV2(stagedXlsm) Then Exit Function
+    WinRecoverInvoiceFilesV2 = recoveredXlsm
+
+    On Error Resume Next
+    If stagedPdf <> "" Then
+        If fso.FileExists(stagedPdf) Then
+            fso.CopyFile stagedPdf, fso.BuildPath(recoveryFolder, _
+                         fso.GetBaseName(recoveredXlsm) & ".pdf"), True
+        End If
+    End If
+    Err.Clear
+    Exit Function
+
+RecoveryFailed:
+    Err.Clear
+End Function
+#End If
 
 Public Sub PrintInvoiceV2()
     Dim ws As Worksheet
@@ -3183,24 +3645,29 @@ Private Sub GetAvailableOutputPathsV2(ByVal excelFolder As String, ByVal pdfFold
     Loop
 End Sub
 
-Private Function GetMacStagingFolderV2() As String
-#If Mac Then
+' Private per-user scratch folder: Excel's sandbox temp directory on the Mac,
+' %TEMP% on Windows.
+Private Function GetStagingFolderV2() As String
     Dim temporaryRoot As String
     Dim stagingFolder As String
 
     On Error GoTo StageError
+#If Mac Then
     temporaryRoot = Environ$("TMPDIR")
     If temporaryRoot = "" Then temporaryRoot = Environ$("HOME")
+#Else
+    temporaryRoot = Environ$("TEMP")
+    If temporaryRoot = "" Then temporaryRoot = Environ$("TMP")
+#End If
     If temporaryRoot = "" Then Exit Function
 
     stagingFolder = JoinPathV2(temporaryRoot, "InvoiceMakerV2")
     If Not FolderExistsV2(stagingFolder) Then MkDir stagingFolder
-    If FolderExistsV2(stagingFolder) Then GetMacStagingFolderV2 = stagingFolder
+    If FolderExistsV2(stagingFolder) Then GetStagingFolderV2 = stagingFolder
     Exit Function
 
 StageError:
-    GetMacStagingFolderV2 = ""
-#End If
+    GetStagingFolderV2 = ""
 End Function
 
 Private Function MoveMacStagedFilesV2(ByVal stagedXlsmPath As String, _

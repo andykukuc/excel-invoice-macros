@@ -9,7 +9,7 @@ Two generations live here side by side.
 | | [`v1/`](v1/) | [`v2/`](v2/) |
 |---|---|---|
 | Status | Stable, superseded | Current |
-| Platform | Windows and Mac | Mac (Apple Silicon, SMB share) |
+| Platform | Windows and Mac | Mac and Windows (SMB share) |
 | Audience | Developer imports the modules by hand | Non-technical user clicks a button |
 | Install | Import three `.bas` files into a workbook | VBA already embedded in the workbook |
 | Saving | Prompts for a folder, writes one `.xlsm` | Writes `.xlsm` and PDF into per-customer folders |
@@ -21,12 +21,12 @@ Nothing in V2 modifies it.
 ## Which one do I want?
 
 Use **V2** if you are running the invoice program. It is what is deployed on
-the Mac mini: the workbook opens from a desktop shortcut, the VBA and buttons
-are already inside it, and saving files into the right customer folders is
+the Mac mini, and the same workbook runs on Windows: the VBA and buttons are
+already inside it, and saving files into the right customer folders is
 automatic.
 
-Use **V1** if you want the original, smaller module set, need Windows support,
-or want to see the behaviour V2 was built from.
+Use **V1** if you want the original, smaller module set or want to see the
+behaviour V2 was built from.
 
 ## What V2 changed
 
@@ -48,6 +48,8 @@ differences:
 - **One-page, black-and-white output.** Compact item rows and fit-to-page
   keep typical invoices on a single sheet; paper and PDF print without colour.
 - **Road Service line type**, alongside Parts, Labor, and Tires.
+- **Mac and Windows.** Saving, printing, and the invoice importer work on both.
+  Windows does its file handling natively and needs no helper script.
 
 Full details in [`v2/README.md`](v2/README.md).
 
@@ -73,7 +75,8 @@ v2/   current three-module VBA project and its README
 The Mac deployment pieces (desktop launcher, SMB mount agent, sandbox helper)
 are **not** published here — they encode the SMB server name and account for a
 specific installation. [`v2/README.md`](v2/README.md) documents what a
-deployment has to provide, including the sandbox helper that V2 requires.
+deployment has to provide, including the sandbox helper that V2 requires on
+the Mac. Windows needs no deployment pieces.
 
 The `.xlsm` workbooks are also git-ignored; the VBA source in this repository
 is the authoritative copy.

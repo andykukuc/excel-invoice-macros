@@ -4,8 +4,9 @@ V2 is the current production implementation. Its VBA project is intentionally
 kept to one standard module plus the two Excel document modules.
 
 The ready-to-use workbook is `Invoice_Template_Formatted_V2.xlsm` in the root
-of the invoices share. Its VBA code and buttons are already embedded; the Mac
-mini user does not need to open the VBA editor or copy and paste any code.
+of the invoices share. Its VBA code and buttons are already embedded; the user
+on the Mac mini or a Windows PC does not need to open the VBA editor or copy
+and paste any code. The same workbook runs on both platforms.
 
 ## What V2 changes
 
@@ -17,6 +18,9 @@ mini user does not need to open the VBA editor or copy and paste any code.
   in Excel's private temporary directory, then using the installed
   `AppleScriptTask` helper to copy them into the customer's `Excel` and `PDF`
   folders.
+- Runs on Windows as well, with no helper: saving, printing, and the importer
+  use VBA and built-in Windows APIs directly. The Windows file picker is
+  filtered to `.xlsm` files.
 - Opens the completed Excel invoice automatically after both permanent copies
   succeed, then removes the private temporary staging files.
 - Never deletes rows from the open template during a save.
@@ -103,15 +107,29 @@ the imported component keeps the correct name.
    repaired, then run `SaveTemplateV2`. Do not use a normal Save; `Workbook_BeforeSave`
    redirects it into the invoice-save routine and refuses an incomplete invoice.
 
+On Windows the steps are the same with Windows shortcuts. Close the workbook
+everywhere, then press **Alt+F11**:
+
+1. Right-click the existing `Module1` and choose **Remove Module1** (do not
+   export), then **File → Import File…** and pick `Module1.bas`.
+2. Confirm the project tree contains only `ThisWorkbook`, `Sheet1`, and
+   `Module1`.
+3. **Debug → Compile VBAProject** — it must complete with no dialog.
+4. Run `InitializeInvoiceMakerV2`, then `SaveTemplateV2`.
+
 ### Upgrading one old invoice
 
-On the production template, click **IMPORTUJ FAKTURĘ / IMPORT INVOICE** (or
-press **Control+Option+F8** and run `ImportLegacyInvoiceV2`), then select the
-old `.xlsm`. It works on V1 invoices and on earlier V2 saves alike. When Mac Excel asks while the importer opens its read-only and
+On the production template, click **IMPORTUJ FAKTURĘ / IMPORT INVOICE**, then
+select the old `.xlsm`. The macro list also offers it as
+`ImportLegacyInvoiceV2` (**Control+Option+F8** on the Mac, **Alt+F8** on
+Windows). It works on V1 invoices and on earlier V2 saves alike, on both
+platforms. When Mac Excel asks while the importer opens its read-only and
 staged copies, choose **Disable Macros**. Review the old/new total comparison
 and approve the replacement only if it is correct. The invoice number, invoice
 date, ship/due dates, data, path, and filename are retained. A hash-verified
-copy of the original is kept under `~/Desktop/Invoice Import Backups`.
+copy of the original is kept in an `Invoice Import Backups` folder on the
+Desktop: `~/Desktop` on the Mac, and the real Windows Desktop (including a
+OneDrive-redirected one) on Windows.
 
 The importer also renders a new one-page PDF and puts it in the customer's
 `PDF` folder under the invoice's own name (beside the XLSM when there is no
@@ -119,6 +137,20 @@ The importer also renders a new one-page PDF and puts it in the customer's
 same Desktop folder first. The PDF is rendered before anything is replaced,
 so a rendering failure leaves the original untouched; a failure while placing
 it is reported as a warning, and running the import again retries it.
+
+On the Mac the file work goes through the AppleScript helper. On Windows it is
+native and needs no helper. The importer stages in `%TEMP%\InvoiceMakerV2`,
+fingerprints files with SHA-256 through the built-in Windows CNG API
+(`bcrypt.dll`), verifies every backup and copy against those hashes, and
+swaps the new file in with a same-folder rename (`MoveFileExW`, replacing the
+existing file). If the swapped file does not verify, the original is restored
+from the verified backup. File access uses `FileSystemObject` and
+`ADODB.Stream`, so customer folder names with Polish letters work.
+
+For developers: a private `RunUnattendedImportV2(legacyPath, backupRoot)`
+entry point runs the same import without dialogs, writing backups under
+`backupRoot`, so it can be tested end to end on Windows through
+`Application.Run`. It is not exposed as a macro.
 
 Keep `Module1.bas` pure ASCII. The VBA editor imports `.bas` files in the
 legacy Mac Roman / Windows-1252 code page, not UTF-8, so a Polish letter typed
@@ -145,6 +177,9 @@ osascript -e 'tell application "Microsoft Excel" to return formula1 of ¬
 Deployment is site-specific and is not published in this repository, because it
 encodes the SMB server name and account for a particular installation. What
 follows is what any such setup has to provide.
+
+Everything in this section applies to the Mac only. Windows needs nothing
+beyond the workbook itself and access to the invoices share.
 
 **The sandbox helper is required.** Mac Excel is sandboxed and cannot write to
 SMB folders without repeatedly prompting for file access. V2 works around this
@@ -198,6 +233,8 @@ current shortcut:
 9. The button captions show Polish letters correctly (`ZAPISZ FAKTURĘ`).
 10. Import Invoice on the template upgrades a test invoice and replaces its
     PDF with a one-page copy, backing up both originals.
+11. On Windows, open the same template from the share and repeat Save, Print,
+    and Import Invoice on a test customer folder.
 
 ## Known issues
 
