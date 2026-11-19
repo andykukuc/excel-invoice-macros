@@ -48,10 +48,12 @@ and paste any code. The same workbook runs on both platforms.
   filename, and replaces its PDF with a freshly rendered one-page copy.
 - Places buttons outside the A:E print area and sets their drawing
   `PrintObject` property to false, so they are excluded from paper and PDF.
-- Prints on a single page whenever the invoice fits at 75% scale or larger
-  (roughly 20 line items). Longer invoices continue onto page two, still one
-  page wide. Item rows are one line tall and grow only for a wrapped
-  description.
+- Prints on a single page whenever the invoice fits at 90% scale or larger
+  (roughly 14 line items). Longer invoices print at full size over two or
+  more pages, one page wide, with the column headings repeated on each page,
+  a "Page 1 of 2" footer, and a page break placed before the last two line
+  items so the totals block is never split or left alone. Item rows are one
+  line tall and grow only for a wrapped description.
 - Paper and PDF output are always greyscale: just before printing or
   exporting, every fill, font and border colour is converted to the grey of
   the same brightness, so the dark heading bands, shaded sections and

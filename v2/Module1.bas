@@ -23,9 +23,10 @@ Private Const SUMMARY_ROW_HEIGHT As Double = 22
 Private Const PAGE_WIDTH_INCHES As Double = 8.5
 Private Const PAGE_HEIGHT_INCHES As Double = 11
 Private Const PAGE_MARGIN_INCHES As Double = 0.5
-' Shrink an invoice onto one page only while the text stays readable. Below
-' this scale a long invoice continues onto page two (still one page wide).
-Private Const MIN_ONE_PAGE_SCALE As Double = 0.75
+' Shrink an invoice onto one page only while the text stays full-size in
+' practice. 0.75 made a 20-line invoice too small to read comfortably; below
+' this scale a long invoice prints at full size over several pages instead.
+Private Const MIN_ONE_PAGE_SCALE As Double = 0.9
 Private Const REPAIR_DESCRIPTION As String = "Repair Labor @ $80.00/hr"
 Private Const TIRE_DESCRIPTION As String = "Install Tire Labor @ $50.00/hr"
 Private Const REPAIR_RATE As Double = 80
@@ -3379,7 +3380,14 @@ End Function
 
 Private Sub ConfigurePageV2(ByVal ws As Worksheet)
     Dim lastRow As Long
+    Dim onePage As Boolean
+
     lastRow = PrintLastRowV2(ws)
+    onePage = FitsOnePageReadablyV2(ws.Range("A1:E" & lastRow))
+    ' Clear any manual break left by an earlier print of this sheet.
+    On Error Resume Next
+    ws.ResetAllPageBreaks
+    On Error GoTo 0
 
     With ws.PageSetup
         .PrintArea = "A1:E" & lastRow
@@ -3391,10 +3399,16 @@ Private Sub ConfigurePageV2(ByVal ws As Worksheet)
         .BottomMargin = Application.InchesToPoints(PAGE_MARGIN_INCHES)
         .Zoom = False
         .FitToPagesWide = 1
-        If FitsOnePageReadablyV2(ws.Range("A1:E" & lastRow)) Then
+        If onePage Then
             .FitToPagesTall = 1
+            .PrintTitleRows = ""
+            .CenterFooter = ""
         Else
+            ' Full size over several pages: repeat the column headings on
+            ' every page and number the pages.
             .FitToPagesTall = False
+            .PrintTitleRows = "$" & (LINEITEM_START - 1) & ":$" & (LINEITEM_START - 1)
+            .CenterFooter = "Page &P of &N"
         End If
         .CenterHorizontally = True
         .PrintGridlines = False
@@ -3403,6 +3417,50 @@ Private Sub ConfigurePageV2(ByVal ws As Worksheet)
         ' greyscale by ApplyGrayscaleV2 just before output.
         .BlackAndWhite = False
     End With
+    If Not onePage Then KeepTotalsTogetherV2 ws, lastRow
+End Sub
+
+' Excel's own page break can split the totals block or leave TOTAL DUE alone
+' on the last page. Break before the last two line items instead, so the next
+' page starts with item rows and carries the whole totals block. The fit
+' estimate keeps a safety margin so this manual break always lands before
+' Excel's natural one. Cosmetic only: a failure here never stops output.
+Private Sub KeepTotalsTogetherV2(ByVal ws As Worksheet, ByVal lastRow As Long)
+    Const SAFETY_POINTS As Double = 36
+    Dim subtotalRow As Long
+    Dim widthScale As Double
+    Dim pageCapacity As Double
+    Dim usedHeight As Double
+    Dim rowNumber As Long
+    Dim breakRow As Long
+
+    On Error GoTo BreakUnavailable
+    subtotalRow = FindSubtotalRowV2(ws)
+    If subtotalRow <= LINEITEM_START + 2 Then Exit Sub
+
+    widthScale = Application.InchesToPoints(PAGE_WIDTH_INCHES - 2 * PAGE_MARGIN_INCHES) / _
+                 ws.Range("A1:E1").Width
+    If widthScale > 1 Then widthScale = 1
+    pageCapacity = Application.InchesToPoints(PAGE_HEIGHT_INCHES - 2 * PAGE_MARGIN_INCHES) / _
+                   widthScale - SAFETY_POINTS
+
+    ' Hidden rows report a height of 0, so they do not count.
+    breakRow = lastRow + 1
+    For rowNumber = 1 To lastRow
+        usedHeight = usedHeight + ws.Rows(rowNumber).Height
+        If usedHeight > pageCapacity Then
+            breakRow = rowNumber
+            Exit For
+        End If
+    Next rowNumber
+    If breakRow > lastRow Then Exit Sub
+    If breakRow > subtotalRow - 2 Then breakRow = subtotalRow - 2
+    If breakRow <= LINEITEM_START Then Exit Sub
+    ws.HPageBreaks.Add Before:=ws.Rows(breakRow)
+    Exit Sub
+
+BreakUnavailable:
+    Err.Clear
 End Sub
 
 ' Converts every fill, font and border colour in printRange to the grey of
