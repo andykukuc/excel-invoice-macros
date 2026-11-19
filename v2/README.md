@@ -52,8 +52,10 @@ and paste any code. The same workbook runs on both platforms.
   (roughly 14 line items). Longer invoices print at full size over two or
   more pages, one page wide, with the column headings repeated on each page,
   a "Page 1 of 2" footer, and a page break placed before the last two line
-  items so the totals block is never split or left alone. Item rows are one
-  line tall and grow only for a wrapped description.
+  items so the totals block is never split or left alone. On screen and on
+  one-page output, item rows are one line tall and grow only for a wrapped
+  description; on multi-page output they grow evenly (up to 44pt) so the
+  items spread across the pages instead of leaving the last page nearly empty.
 - Paper and PDF output are always greyscale: just before printing or
   exporting, every fill, font and border colour is converted to the grey of
   the same brightness, so the dark heading bands, shaded sections and

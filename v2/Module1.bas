@@ -2291,6 +2291,7 @@ PrintDone:
     Application.ScreenUpdating = False
     RestoreColoursV2 colourChanges
     ShowAllBucketsV2 ws
+    RestoreScreenLayoutV2 ws
     ProtectInvoiceV2 ws
     Application.EnableEvents = oldEvents
     Application.ScreenUpdating = oldScreen
@@ -2309,6 +2310,7 @@ PrintError:
     Application.ScreenUpdating = False
     RestoreColoursV2 colourChanges
     ShowAllBucketsV2 ws
+    RestoreScreenLayoutV2 ws
     ProtectInvoiceV2 ws
     Application.EnableEvents = oldEvents
     Application.ScreenUpdating = oldScreen
@@ -3417,7 +3419,76 @@ Private Sub ConfigurePageV2(ByVal ws As Worksheet)
         ' greyscale by ApplyGrayscaleV2 just before output.
         .BlackAndWhite = False
     End With
-    If Not onePage Then KeepTotalsTogetherV2 ws, lastRow
+    If Not onePage Then
+        SpreadItemRowsV2 ws, lastRow
+        KeepTotalsTogetherV2 ws, lastRow
+    End If
+End Sub
+
+' Printing may spread the item rows and add a manual page break for paper.
+' Put the editable sheet back to its compact on-screen layout afterwards.
+Private Sub RestoreScreenLayoutV2(ByVal ws As Worksheet)
+    Dim subtotalRow As Long
+    On Error Resume Next
+    ws.ResetAllPageBreaks
+    subtotalRow = FindSubtotalRowV2(ws)
+    If subtotalRow > LINEITEM_START Then SizeItemRowsV2 ws, subtotalRow - 1
+    Err.Clear
+    On Error GoTo 0
+End Sub
+
+' Print scale Excel uses for FitToPagesWide = 1 (never above 100%).
+Private Function PrintWidthScaleV2(ByVal ws As Worksheet) As Double
+    PrintWidthScaleV2 = Application.InchesToPoints(PAGE_WIDTH_INCHES - 2 * PAGE_MARGIN_INCHES) / _
+                        ws.Range("A1:E1").Width
+    If PrintWidthScaleV2 > 1 Then PrintWidthScaleV2 = 1
+End Function
+
+' A long invoice prints over several pages anyway, so give its line items the
+' room of the original 44pt layout instead of packing them onto page one and
+' leaving the last page almost empty. Visible item rows grow evenly (text
+' stays centred) until the items fill the pages the invoice already needs.
+' Rows already taller because of a wrapped description keep their height.
+Private Sub SpreadItemRowsV2(ByVal ws As Worksheet, ByVal lastRow As Long)
+    Const MAX_SPREAD_ROW_HEIGHT As Double = 44
+    Const SAFETY_POINTS As Double = 48
+    Dim subtotalRow As Long
+    Dim rowNumber As Long
+    Dim visibleRows As Long
+    Dim pageHeight As Double
+    Dim totalHeight As Double
+    Dim itemHeight As Double
+    Dim pageCount As Long
+    Dim available As Double
+    Dim targetHeight As Double
+
+    subtotalRow = FindSubtotalRowV2(ws)
+    If subtotalRow <= LINEITEM_START Then Exit Sub
+    For rowNumber = LINEITEM_START To subtotalRow - 1
+        If Not ws.Rows(rowNumber).Hidden Then visibleRows = visibleRows + 1
+    Next rowNumber
+    If visibleRows = 0 Then Exit Sub
+
+    pageHeight = Application.InchesToPoints(PAGE_HEIGHT_INCHES - 2 * PAGE_MARGIN_INCHES) / _
+                 PrintWidthScaleV2(ws)
+    totalHeight = ws.Range("A1:E" & lastRow).Height
+    itemHeight = ws.Range("A" & LINEITEM_START & ":E" & subtotalRow - 1).Height
+    pageCount = Int(totalHeight / pageHeight) + 1
+    ' Room left for items once the header, totals, the heading row repeated
+    ' on each later page and a safety margin per page are accounted for.
+    available = pageCount * pageHeight - (totalHeight - itemHeight) - _
+                (pageCount - 1) * ws.Rows(LINEITEM_START - 1).Height - _
+                pageCount * SAFETY_POINTS
+    targetHeight = available / visibleRows
+    If targetHeight > MAX_SPREAD_ROW_HEIGHT Then targetHeight = MAX_SPREAD_ROW_HEIGHT
+
+    For rowNumber = LINEITEM_START To subtotalRow - 1
+        If Not ws.Rows(rowNumber).Hidden Then
+            If ws.Rows(rowNumber).RowHeight < targetHeight Then
+                ws.Rows(rowNumber).RowHeight = targetHeight
+            End If
+        End If
+    Next rowNumber
 End Sub
 
 ' Excel's own page break can split the totals block or leave TOTAL DUE alone
@@ -3428,7 +3499,6 @@ End Sub
 Private Sub KeepTotalsTogetherV2(ByVal ws As Worksheet, ByVal lastRow As Long)
     Const SAFETY_POINTS As Double = 36
     Dim subtotalRow As Long
-    Dim widthScale As Double
     Dim pageCapacity As Double
     Dim usedHeight As Double
     Dim rowNumber As Long
@@ -3438,11 +3508,8 @@ Private Sub KeepTotalsTogetherV2(ByVal ws As Worksheet, ByVal lastRow As Long)
     subtotalRow = FindSubtotalRowV2(ws)
     If subtotalRow <= LINEITEM_START + 2 Then Exit Sub
 
-    widthScale = Application.InchesToPoints(PAGE_WIDTH_INCHES - 2 * PAGE_MARGIN_INCHES) / _
-                 ws.Range("A1:E1").Width
-    If widthScale > 1 Then widthScale = 1
     pageCapacity = Application.InchesToPoints(PAGE_HEIGHT_INCHES - 2 * PAGE_MARGIN_INCHES) / _
-                   widthScale - SAFETY_POINTS
+                   PrintWidthScaleV2(ws) - SAFETY_POINTS
 
     ' Hidden rows report a height of 0, so they do not count.
     breakRow = lastRow + 1
